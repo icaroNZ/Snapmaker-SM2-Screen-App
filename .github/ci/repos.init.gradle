@@ -1,0 +1,19 @@
+// CI-only Gradle init script, passed with --init-script by .github/workflows/a250t-build.yml.
+// build.gradle resolves everything through Aliyun mirrors, which can be slow or unreachable from GitHub-hosted
+// runners, and Gradle does not skip a repository that fails with a connection error. An init script's
+// allprojects {} runs before any build script is evaluated, so the repositories added here come FIRST and the ones
+// in build.gradle (Aliyun public/google, mavenLocal, mavenCentral, jitpack) are tried after them. Aliyun "public" is
+// kept because it still mirrors jcenter-only artifacts. Local builds are unaffected.
+allprojects { p ->
+    p.buildscript.repositories {
+        google()
+        mavenCentral()
+    }
+    p.repositories {
+        google()
+        mavenCentral()
+    }
+    p.afterEvaluate {
+        println "[a250t-ci] ${p.path}: buildscript repos=${p.buildscript.repositories*.name} project repos=${p.repositories*.name}"
+    }
+}

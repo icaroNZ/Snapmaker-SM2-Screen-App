@@ -1,0 +1,110 @@
+# Build and unit-test FabScreen (Snapmaker 2.0 touchscreen app) on GitHub Actions.
+# The toolchain (JDK 8, Android SDK 28, NDK 22.1.7171670, CMake 3.10.2) is not available on the owner's Mac.
+# The resulting APK is debug-signed: it is a build check only and must NOT be installed on the real touchscreen.
+name: a250t-build
+
+on:
+  push:
+    branches: [a250t/main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # ubuntu-22.04: build-tools 28 binaries still find libtinfo.so.5 there (24.04 dropped it)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # Modern sdkmanager needs JDK 17; Gradle 5.4.1 + AGP 3.5.3 need JDK 8 (set last, so JAVA_HOME = 8 for Gradle).
+      - name: JDK 17 for sdkmanager
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android SDK, NDK 22.1.7171670, CMake 3.10.2
+        uses: android-actions/setup-android@v3
+        with:
+          packages: >-
+            platform-tools
+            platforms;android-28
+            build-tools;28.0.3
+            ndk;22.1.7171670
+            cmake;3.10.2.4988404
+
+      - name: JDK 8 for Gradle 5.4.1
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '8'
+
+      - name: Toolchain versions
+        run: |
+          java -version 2>&1
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-} ANDROID_HOME=${ANDROID_HOME:-}"
+          ls "$ANDROID_HOME/ndk" "$ANDROID_HOME/cmake" "$ANDROID_HOME/build-tools" "$ANDROID_HOME/platforms"
+          if ldconfig -p | grep -q libtinfo.so.5; then echo "libtinfo.so.5 present"; else
+            echo "libtinfo.so.5 missing, installing"; sudo apt-get update -qq && sudo apt-get install -y -qq libtinfo5 libncurses5; fi
+
+      - name: Gradle caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', '**/*.gradle', 'buildSrc/**/*.kt*', '.github/ci/repos.init.gradle') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      # CI-only dummy Firebase config (placeholder values). Never commit fabscreen/google-services.json.
+      - name: Dummy google-services.json
+        run: cp fabscreen/google-services.json.example fabscreen/google-services.json
+
+      - name: Write local.properties
+        run: echo "sdk.dir=$ANDROID_HOME" > local.properties
+
+      - name: Build debug APKs
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace --init-script .github/ci/repos.init.gradle --version
+          ./gradlew --no-daemon --stacktrace --init-script .github/ci/repos.init.gradle assembleDebug
+
+      - name: Unit tests
+        run: ./gradlew --no-daemon --stacktrace --init-script .github/ci/repos.init.gradle test
+
+      - name: Test summary
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import glob, xml.etree.ElementTree as ET
+          total = fail = err = skip = 0
+          for f in sorted(glob.glob('**/build/test-results/**/TEST-*.xml', recursive=True)):
+              s = ET.parse(f).getroot()
+              t, fa, e, sk = (int(s.get(k, 0)) for k in ('tests', 'failures', 'errors', 'skipped'))
+              total += t; fail += fa; err += e; skip += sk
+              print(f"{f}: tests={t} failures={fa} errors={e} skipped={sk}")
+          print(f"TOTAL tests={total} failures={fail} errors={err} skipped={skip}")
+          PY
+
+      - name: Upload APKs
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fabscreen-debug-apks
+          path: |
+            fabscreen/build/outputs/apk/debug/*.apk
+            fabscreen-updating/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: |
+            **/build/reports/tests/
+            **/build/test-results/
+          if-no-files-found: warn
