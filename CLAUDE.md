@@ -16,7 +16,8 @@ and **UDP discovery on 20054** that Luban, Snapmaker Orca and the Cura plugin us
 
 ### State of this branch
 - `a250t/main` = upstream `main` (one squashed commit `b9c4764`, app `V1.19.3`) + this file. No code changes.
-- No licence ("TBD"), no CI, only Android Studio placeholder tests.
+- No licence ("TBD"), no CI. One real JVM test class, `fabscreen/src/test/java/com/snapmaker/fabscreen/FabPacketTest.java`
+  (frame round-trip, checksum vectors, stream reader); the other test files are Android Studio placeholders.
 
 ### Tech stack
 Java 8 (603 files), Android compileSdk/targetSdk 28, minSdk 23 (stock screen runs SDK 25), AGP 3.5.3, Gradle wrapper
@@ -34,7 +35,7 @@ cd /Users/icaro/Documents/Projects/SnapMaker/Snapmaker-SM2-Screen-App
 export JAVA_HOME=$(/usr/libexec/java_home -v 1.8)
 cp fabscreen/google-services.json.example fabscreen/google-services.json   # or remove the 2 Firebase plugins
 ./gradlew assembleDebug        # -> fabscreen/build/outputs/apk/debug/fabscreen-release_V1.19.3.apk (name set in fabscreen/build.gradle:9-13)
-./gradlew test                 # placeholder ExampleUnitTest only
+./gradlew test                 # FabPacketTest (4 tests) + placeholder ExampleUnitTests
 ```
 See skill `screen-build-test` for details and failure modes. Debug builds inject `MockSlaveComputer`
 (`data/Model.java:43-44`, reports an A250) so the UI, HTTP API and update flow run in an emulator without hardware.
@@ -45,7 +46,7 @@ See skill `screen-build-test` for details and failure modes. Debug builds inject
 | `fabscreen/` | App module `com.snapmaker.fabscreen`; `src/main/java/com/snapmaker/fabscreen/modules/<feature>/` (home, browse, preview, print, printsettings, control, calibration, lasercalibration, laser10wcamera, cnc*assistant, dualextrudercalibration, loadfilament, guide*, settings, update, remote, enclosure, airpurifier, emergencystop, about, factory, experiment); `res/` 7 locales, ~60 MB GIF/PNG |
 | `libraries/fabscreen-legacy/` | Core library, package `fabscreen.libraries.legacy` (below `L/` = `src/main/java/fabscreen/libraries/legacy/`) |
 | `L/data/` | `Model`, `MachineController`, `PrintController`, `Preferences`, `Constants`, `ISlaveComputer`, `MockSlaveComputer`, `LaserCameraController` (Bluetooth), `module/`, `remote/`, `version/`, `api/` (cloud), `calibration/` |
-| `L/data/serial/` | `SerialConnection` (`/dev/ttyHSL1` 115200), `SerialController` (request/response state machine), `fabpacket/` (frame, builders, payload parsers) |
+| `L/data/serial/` | `SerialConnection` (115200 baud; device `/dev/ttyHSL1` set in `MachineController.java:33`), `SerialController` (request/response state machine), `fabpacket/` (frame, builders, payload parsers) |
 | `L/server/` | `http/HTTPServer` (8080), `http/handlers/` (Auth, Main, Camera, Orca), `socket/DiscoverServer` (UDP 20054) |
 | `L/lib/` | `serialport` (JNI), `fabserver` (AndServer wrapper), `file` (local + USB via libaums), `network` (Wi-Fi), `parser` (G-code header/preview), `update` (bundle parser), `opengl` (preview), `crash`, `LogHelper` |
 | `L/route/RoutePath.java` | ARouter paths |
@@ -81,7 +82,7 @@ See skill `screen-build-test` for details and failure modes. Debug builds inject
 - **New controller command (FabPacket opcode):** builder in `FabPacketBuilder.java` -> method in `ISlaveComputer.java`
   -> implement in `SerialController.java` (`request(packet[, timeout]).map(...)`) **and** `MockSlaveComputer.java` ->
   reply parser in `FabPacketContent.java` -> `case` in `SerialController.onReceive()`. Requests are matched to replies by
-  `FabPacket.getKey()` (event id + first payload byte). The controller side must exist in
+  `FabPacket.getKey()` (event id pair, plus the first payload byte for event ids > 0x04). The controller side must exist in
   `Snapmaker2-Controller/snapmaker/src/hmi/event_handler.{h,cpp}` (ask `sm-controller`).
 - **New HTTP endpoint:** add a `URI_*` constant and `@GetMapping/@PostMapping` method in a `@RestController` handler
   under `server/http/handlers/`; call `if (!ensureConnection(request, response)) return;` first unless it must be
@@ -101,13 +102,13 @@ See skill `screen-build-test` for details and failure modes. Debug builds inject
 | Firmware bundle `.bin` (major header, part types 0/1/2) | controller `snapmaker/scripts/pack.py` (`sm-controller`) |
 | HTTP 8080 `/api/v1/*` (token + touchscreen approval) | Luban `src/server/services/machine/channels/SstpHttpChannel.ts` (`sm-luban`), OrcaSlicer `src/slic3r/Utils/Snapmaker2.cpp` (`sm-orca`), Cura `network_plugin/HTTPNetworkedPrinterOutputDevice.py` (`sm-cura`) |
 | UDP 20054 `discover` | Luban `network-discover/NetworkedMachineFinder.ts:9`, Cura `network_plugin/DiscoverSocket.py` |
-| G-code `;Header Start` block | Luban / LunarSlicer / Orca / Cura / CNC post (`sm-luban`, `sm-lunarslicer`, `sm-orca`, `sm-cura`, `sm-cnc-post`) |
+| G-code `;Header Start` block | written by Luban (`src/server/slicer/post-processor.ts`, wraps LunarSlicer output; `workers/generateGcode.js` laser/CNC) and Cura (`gcode_writer/SnapmakerGCodeWriter.py`) (`sm-luban`, `sm-cura`); Orca and the CNC posts write none, so no preview/bounds/time (`sm-orca`, `sm-cnc-post`) |
 | Cloud `GET /v1/fabscreen/version` (api.snapmaker.com) | same JSON shape as `snapmaker-version-center/upgrade/firmware/fabscreen/version.json` (`sm-version-center`) |
 | SACP | **not used** here (`sm-sacp` covers J1/Artisan/A400) |
 
 ### HTTP API behaviour other repos depend on
-- `POST /api/v1/connect` (optional `token`): returns `{token, readonly, series, headType, hasEnclosure}`; 403 while
-  another client's session is pending. A new token must be approved with **Yes** on the touchscreen.
+- `POST /api/v1/connect` (optional `token`): returns `{token, readonly, series, headType, hasEnclosure}`; 403 whenever
+  a session with a different token is current, pending or granted (`AuthRequestHandler.java:33`). A new token must be approved with **Yes** on the touchscreen.
 - Every other `/api/v1/*` call: `?token=`; 400 no token, 401 not current session, **204 = awaiting approval**.
 - Session expires after **5 s** without requests (`SessionManager.java:161`, checked every 5 s by
   `RemoteController.java:63`); up to 10 granted tokens persist in `session.json` (`SessionManager.java:86`).
@@ -126,7 +127,9 @@ See skill `screen-build-test` for details and failure modes. Debug builds inject
   **skips** the controller part when the bundle's controller version (minor image bytes 5-36, `FabUpdatePackage.java:82`)
   equals the 0xa9 0x03 reply, unless `FLAG_FORCE_UPDATE` (bit 1) is set; `pack.py:195` writes flag 0. The controller
   reply drops the first 10 bytes of its stored version (`Snapmaker2-Controller/snapmaker/src/service/upgrade.cpp`,
-  `GetMainControllerVer`), so whether the two strings ever compare equal is UNVERIFIED: bump the version for every reflash.
+  `GetMainControllerVer`): `Snapmaker_V5.2.1-a250t.1` vs `V5.2.1-a250t.1`, and neither side strips the prefix
+  (`SerialController.java:1568-1580`), so per code the controller part is always re-sent (hardware UNVERIFIED). Still
+  bump the version for every reflash.
 - With the controller's optional `HOST_PRINT_STATUS_TRACKING` (default OFF), USB-serial host jobs show status 3
   ("working with PC port") and the screen's Pause/Stop are refused (see `../_snapmaker2-review/integration/Snapmaker2-Controller.md`).
 - The dual-extruder calibration prints come in A150/A250/A350 variants; A250T uses the `a250_*` files.
