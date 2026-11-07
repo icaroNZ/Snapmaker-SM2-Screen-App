@@ -1,0 +1,146 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Levelling options asked before levelling starts: measurement grid, bed temperature and soak time. -->
+<androidx.cardview.widget.CardView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    app:cardCornerRadius="@dimen/radius_8">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@color/default_theme_primary"
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@+id/tv_leveling_options_title"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="@dimen/margin_layout_10"
+            android:layout_marginTop="@dimen/margin_layout_20"
+            android:layout_marginEnd="@dimen/margin_layout_10"
+            android:text="@string/calibration_leveling_options_title"
+            android:textAlignment="center"
+            android:textColor="@color/default_theme_title"
+            android:textSize="@dimen/font_size_h4" />
+
+        <!-- grid -->
+        <LinearLayout
+            android:id="@+id/ll_leveling_options_grid"
+            style="@style/LevelingOptionRow">
+
+            <TextView
+                style="@style/LevelingOptionLabel"
+                android:text="@string/calibration_leveling_options_grid" />
+
+            <Button
+                android:id="@+id/btn_leveling_options_grid_minus"
+                style="@style/LevelingOptionStepButton"
+                android:text="@string/calibration_leveling_options_minus" />
+
+            <TextView
+                android:id="@+id/tv_leveling_options_grid_value"
+                style="@style/LevelingOptionValue" />
+
+            <Button
+                android:id="@+id/btn_leveling_options_grid_plus"
+                style="@style/LevelingOptionStepButton"
+                android:text="@string/calibration_leveling_options_plus" />
+        </LinearLayout>
+
+        <!-- bed temperature -->
+        <LinearLayout style="@style/LevelingOptionRow">
+
+            <TextView
+                style="@style/LevelingOptionLabel"
+                android:text="@string/calibration_leveling_options_bed_temp" />
+
+            <Button
+                android:id="@+id/btn_leveling_options_temp_minus"
+                style="@style/LevelingOptionStepButton"
+                android:text="@string/calibration_leveling_options_minus" />
+
+            <TextView
+                android:id="@+id/tv_leveling_options_temp_value"
+                style="@style/LevelingOptionValue" />
+
+            <Button
+                android:id="@+id/btn_leveling_options_temp_plus"
+                style="@style/LevelingOptionStepButton"
+                android:text="@string/calibration_leveling_options_plus" />
+        </LinearLayout>
+
+        <!-- soak time -->
+        <LinearLayout style="@style/LevelingOptionRow">
+
+            <TextView
+                android:id="@+id/tv_leveling_options_soak_label"
+                style="@style/LevelingOptionLabel"
+                android:text="@string/calibration_leveling_options_soak" />
+
+            <Button
+                android:id="@+id/btn_leveling_options_soak_minus"
+                style="@style/LevelingOptionStepButton"
+                android:text="@string/calibration_leveling_options_minus" />
+
+            <TextView
+                android:id="@+id/tv_leveling_options_soak_value"
+                style="@style/LevelingOptionValue" />
+
+            <Button
+                android:id="@+id/btn_leveling_options_soak_plus"
+                style="@style/LevelingOptionStepButton"
+                android:text="@string/calibration_leveling_options_plus" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/tv_leveling_options_hint"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="@dimen/margin_layout_10"
+            android:layout_marginTop="@dimen/margin_layout_10"
+            android:layout_marginEnd="@dimen/margin_layout_10"
+            android:layout_marginBottom="@dimen/margin_layout_10"
+            android:text="@string/calibration_leveling_options_hint"
+            android:textAlignment="center"
+            android:textColor="@color/default_theme_desc1"
+            android:textSize="@dimen/font_size_h6" />
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="@dimen/separator"
+            android:layout_marginStart="@dimen/margin_layout_5"
+            android:layout_marginEnd="@dimen/margin_layout_5"
+            android:background="@color/default_theme_separator" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btn_leveling_options_cancel"
+                style="@style/AppTheme.Button.SquareGrey"
+                android:layout_width="0dp"
+                android:layout_height="@dimen/height_button_45"
+                android:layout_marginStart="@dimen/margin_layout_5"
+                android:layout_marginTop="@dimen/margin_layout_5"
+                android:layout_marginBottom="@dimen/margin_layout_5"
+                android:layout_weight="1"
+                android:text="@string/all_cancel" />
+
+            <Button
+                android:id="@+id/btn_leveling_options_start"
+                style="@style/AppTheme.Button.SquareBlue"
+                android:layout_width="0dp"
+                android:layout_height="@dimen/height_button_45"
+                android:layout_marginStart="@dimen/margin_layout_5"
+                android:layout_marginTop="@dimen/margin_layout_5"
+                android:layout_marginEnd="@dimen/margin_layout_5"
+                android:layout_marginBottom="@dimen/margin_layout_5"
+                android:layout_weight="1"
+                android:text="@string/calibration_leveling_options_start"
+                android:textAllCaps="false" />
+        </LinearLayout>
+    </LinearLayout>
+</androidx.cardview.widget.CardView>

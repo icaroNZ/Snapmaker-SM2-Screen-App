@@ -4,6 +4,7 @@ import android.content.Context;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.AbsListView;
 import android.widget.BaseAdapter;
 import android.widget.TextView;
 
@@ -20,6 +21,8 @@ public class CalibrationPanelAdapter extends BaseAdapter {
     private List<CalibrationPoint> mPoints;
     private boolean mIsButtonsEnabled;
     private OnPointClickListener mOnPointClickListener;
+    private int mCellSizePx = 0; // 0 = layout default (40 dp)
+    private boolean mShowIndex = true;
 
     public CalibrationPanelAdapter(Context context) {
         mContext = context;
@@ -27,7 +30,16 @@ public class CalibrationPanelAdapter extends BaseAdapter {
 
     @Override
     public int getCount() {
-        return mPoints.size();
+        // no points until the levelling options are chosen
+        return mPoints == null ? 0 : mPoints.size();
+    }
+
+    /**
+     * Cell size for grids above 7x7 (11 columns must fit in the 280 dp panel); index labels need about 36 dp.
+     */
+    public void setCellSize(int cellSizePx, boolean showIndex) {
+        mCellSizePx = cellSizePx;
+        mShowIndex = showIndex;
     }
 
     @Override
@@ -57,6 +69,12 @@ public class CalibrationPanelAdapter extends BaseAdapter {
         if (convertView == null) {
             convertView = LayoutInflater.from(mContext).inflate(R.layout.item_calibration_point, parent, false);
         }
+        if (mCellSizePx > 0) {
+            ViewGroup.LayoutParams lp = convertView.getLayoutParams();
+            if (lp == null || lp.width != mCellSizePx || lp.height != mCellSizePx) {
+                convertView.setLayoutParams(new AbsListView.LayoutParams(mCellSizePx, mCellSizePx));
+            }
+        }
 
         CalibrationPoint point = getItem(position);
 
@@ -65,6 +83,7 @@ public class CalibrationPanelAdapter extends BaseAdapter {
         final TextView mTvIndex = convertView.findViewById(R.id.tv_calibration_index);
 
         mTvIndex.setText(String.valueOf(point.getViewOrder()));
+        mTvIndex.setVisibility(mShowIndex ? View.VISIBLE : View.GONE);
 
         button.setEnabled(mIsButtonsEnabled);
 

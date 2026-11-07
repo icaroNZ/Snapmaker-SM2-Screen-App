@@ -710,4 +710,28 @@ Posibles causas:
     <string name="laser_10W_dialog_changer_header">El cabezal de la herramienta se ha cambiado. Con el fin de garantizar el resultado de la Captura de cámara, le recomendamos volver a calibrar la cámara.
 ¿Quiere volver a calibrarla ahora?</string>
 
+    <!-- Heat-soaked levelling and 3x3..11x11 grid (A250T fork; English in every locale until translated) -->
+    <string name="calibration_leveling_options_title">Leveling Options</string>
+    <string name="calibration_leveling_options_grid">Measurement points</string>
+    <string name="calibration_leveling_options_grid_value">%1$d × %1$d</string>
+    <string name="calibration_leveling_options_bed_temp">Bed temperature</string>
+    <string name="calibration_leveling_options_temp_value">%1$d °C</string>
+    <string name="calibration_leveling_options_bed_off">Off</string>
+    <string name="calibration_leveling_options_soak">Soak time</string>
+    <string name="calibration_leveling_options_soak_value">%1$d min</string>
+    <string name="calibration_leveling_options_hint">The machine heats the bed to this temperature and keeps it there for the soak time before measuring, so the mesh matches the hot bed. Off = measure cold. Needs controller firmware 5.2.1-a250t.3 or later.</string>
+    <string name="calibration_leveling_options_start">Start</string>
+    <string name="calibration_heat_soak_heating">Heating the bed</string>
+    <string name="calibration_heat_soak_temp_value">%1$d / %2$d °C</string>
+    <string name="calibration_heat_soak_heating_desc">Then the bed soaks for %1$s before measuring.</string>
+    <string name="calibration_heat_soak_heating_no_soak_desc">Measuring starts when the bed is at temperature.</string>
+    <string name="calibration_heat_soak_soaking">Soaking the bed at %1$d °C</string>
+    <string name="calibration_heat_soak_soaking_desc">Bed %1$d °C. Measuring starts when the soak ends (time is approximate).</string>
+    <string name="calibration_heat_soak_waiting">Soak finished</string>
+    <string name="calibration_heat_soak_waiting_desc">Homing and starting to measure…</string>
+    <string name="calibration_heat_soak_cancel">Cancel</string>
+    <string name="calibration_heat_soak_cancel_confirm_desc">Stop heating the bed and cancel leveling?</string>
+    <string name="calibration_dialog_leveling_start_fail_desc">Leveling could not start. The bed heating or soak was stopped, or the toolhead is not ready. Please retry or quit.</string>
+    <string name="calibration_dialog_heat_soak_leveling_fail_desc">Leveling failed. The bed heating or soak was stopped (bed fault or emergency stop), or probing failed. Please retry or quit.</string>
+
 </resources>

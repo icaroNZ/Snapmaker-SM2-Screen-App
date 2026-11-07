@@ -228,4 +228,40 @@
         <item name="android:windowContentOverlay">@null</item>
     </style>
 
+    <!-- Levelling options dialog (heat-soaked levelling, A250T) -->
+    <style name="LevelingOptionRow">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_marginStart">@dimen/margin_layout_10</item>
+        <item name="android:layout_marginTop">@dimen/margin_layout_10</item>
+        <item name="android:layout_marginEnd">@dimen/margin_layout_10</item>
+        <item name="android:gravity">center_vertical</item>
+        <item name="android:orientation">horizontal</item>
+    </style>
+
+    <style name="LevelingOptionLabel">
+        <item name="android:layout_width">0dp</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_weight">1</item>
+        <item name="android:textColor">@color/default_theme_desc1</item>
+        <item name="android:textSize">@dimen/font_size_h5</item>
+    </style>
+
+    <style name="LevelingOptionStepButton" parent="AppTheme.Button.SquareGrey">
+        <item name="android:layout_width">@dimen/height_button_45</item>
+        <item name="android:layout_height">@dimen/height_button_45</item>
+        <item name="android:minWidth">0dp</item>
+        <item name="android:minHeight">0dp</item>
+        <item name="android:padding">0dp</item>
+        <item name="android:textSize">@dimen/font_size_h3</item>
+    </style>
+
+    <style name="LevelingOptionValue">
+        <item name="android:layout_width">90dp</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:textAlignment">center</item>
+        <item name="android:textColor">@color/default_theme_title</item>
+        <item name="android:textSize">@dimen/font_size_h4</item>
+    </style>
+
 </resources>

@@ -1,17 +1,23 @@
 package com.snapmaker.fabscreen.modules.calibration;
 
 import android.annotation.SuppressLint;
+import android.os.SystemClock;
 
 import com.orhanobut.logger.Logger;
 
 import java.util.ArrayList;
+import java.util.concurrent.TimeUnit;
 
 import fabscreen.libraries.legacy.base.BaseViewModel;
 import fabscreen.libraries.legacy.data.calibration.CalibrationPoint;
+import fabscreen.libraries.legacy.data.calibration.HeatSoakTracker;
+import fabscreen.libraries.legacy.data.calibration.LevelingParams;
+import fabscreen.libraries.legacy.data.serial.fabpacket.FabPacketContent;
 import fabscreen.libraries.legacy.lib.LogHelper;
 import io.reactivex.Observable;
 import io.reactivex.android.schedulers.AndroidSchedulers;
 import io.reactivex.disposables.CompositeDisposable;
+import io.reactivex.disposables.Disposable;
 import io.reactivex.subjects.BehaviorSubject;
 import io.reactivex.subjects.PublishSubject;
 
@@ -32,6 +38,15 @@ public class CalibrationViewModel extends BaseViewModel {
     private int mCalibratedPointCount = 0;
     private float mHeatedLevelingTemperature = 0;
 
+    // Heat soak done by the controller before measuring (firmware SM2-5.2.1-a250t.3+). 0 = no heating.
+    private int mSoakBedTemperature;
+    private int mSoakMinutes;
+    private boolean mUserCancelled = false;
+    private HeatSoakTracker mHeatSoakTracker = new HeatSoakTracker(0, 0);
+    private Disposable mHeatSoakTicker;
+    private BehaviorSubject<HeatSoakStatus> mHeatSoakStatusSubject =
+            BehaviorSubject.createDefault(new HeatSoakStatus(HeatSoakTracker.PHASE_DONE, 0, 0, 0, 0));
+
     private BehaviorSubject<Boolean> mAutoZOffsetSubject = BehaviorSubject.createDefault(false);
     private BehaviorSubject<Boolean> mIsAdjustZOffsetSubject = BehaviorSubject.createDefault(false);
     private BehaviorSubject<Boolean> mIsMovingSubject = BehaviorSubject.createDefault(false);
@@ -48,7 +63,134 @@ public class CalibrationViewModel extends BaseViewModel {
 
         mIsHeatedLevelingOn = getModel().getPreferences().get3DPCalibrationHeatedLevelingOn();
 
-        mGrid = getModel().getPreferences().get3DPCalibrationGrid();
+        mGrid = LevelingParams.clampGrid(getModel().getPreferences().get3DPCalibrationGrid());
+
+        mSoakBedTemperature = getModel().getPreferences().get3DPCalibrationSoakBedTemperature();
+        mSoakMinutes = getModel().getPreferences().get3DPCalibrationSoakMinutes();
+    }
+
+    /**
+     * Snapshot of the heat soak for the progress overlay.
+     */
+    public static class HeatSoakStatus {
+        public final int phase;
+        public final int bedTemperature;
+        public final int targetTemperature;
+        public final int soakSeconds;
+        public final int secondsLeft;
+
+        HeatSoakStatus(int phase, int bedTemperature, int targetTemperature, int soakSeconds, int secondsLeft) {
+            this.phase = phase;
+            this.bedTemperature = bedTemperature;
+            this.targetTemperature = targetTemperature;
+            this.soakSeconds = soakSeconds;
+            this.secondsLeft = secondsLeft;
+        }
+
+        public boolean isActive() {
+            return phase != HeatSoakTracker.PHASE_DONE;
+        }
+    }
+
+    /**
+     * Options chosen in the levelling options dialog; remembered for next time.
+     */
+    public void setLevelingOptions(int grid, int bedTemperature, int soakMinutes) {
+        mGrid = LevelingParams.clampGrid(grid);
+        mSoakBedTemperature = LevelingParams.clampBedTemperature(bedTemperature);
+        mSoakMinutes = LevelingParams.clampSoakMinutes(soakMinutes);
+
+        getModel().getPreferences().set3DPCalibrationGrid(mGrid);
+        getModel().getPreferences().set3DPCalibrationSoakBedTemperature(mSoakBedTemperature);
+        getModel().getPreferences().set3DPCalibrationSoakMinutes(mSoakMinutes);
+
+        Logger.i("Leveling: options %s, grid %d, bed %d C, soak %d min", mIsAutoMode ? "auto" : "manual",
+                mGrid, mSoakBedTemperature, mSoakMinutes);
+    }
+
+    public int getSoakBedTemperature() {
+        return mSoakBedTemperature;
+    }
+
+    public int getSoakMinutes() {
+        return mSoakMinutes;
+    }
+
+    /**
+     * True if the controller heats the bed before measuring (so the bed must be turned off afterwards).
+     */
+    public boolean isHeatSoakUsed() {
+        return mSoakBedTemperature > 0;
+    }
+
+    public Observable<HeatSoakStatus> getHeatSoakStatusObservable() {
+        return mHeatSoakStatusSubject.hide();
+    }
+
+    private void emitHeatSoakStatus() {
+        final long now = SystemClock.elapsedRealtime();
+        mHeatSoakStatusSubject.onNext(new HeatSoakStatus(mHeatSoakTracker.getPhase(),
+                mHeatSoakTracker.getBedTemp(), mHeatSoakTracker.getTargetTemp(),
+                mHeatSoakTracker.getSoakSeconds(), mHeatSoakTracker.getSecondsLeft(now)));
+    }
+
+    private void startHeatSoakTracking(int soakSeconds) {
+        stopHeatSoakTicker();
+        mHeatSoakTracker = new HeatSoakTracker(mSoakBedTemperature, soakSeconds);
+        if (!mHeatSoakTracker.isActive()) {
+            emitHeatSoakStatus();
+            return;
+        }
+
+        Logger.i("Leveling: heat soak started, bed %d C, soak %d s", mSoakBedTemperature, soakSeconds);
+        // The controller sends no progress while heating/soaking: follow the bed temperature each second.
+        mHeatSoakTicker = Observable.interval(0, 1, TimeUnit.SECONDS)
+                .observeOn(AndroidSchedulers.mainThread())
+                .subscribe(tick -> {
+                    FabPacketContent.MachineStatus status = getModel().getSlaveComputer().getMachineStatus();
+                    final int bed = status != null ? status.bedTemperature : 0;
+                    if (mHeatSoakTracker.update(bed, SystemClock.elapsedRealtime())) {
+                        Logger.i("Leveling: heat soak phase %d, bed %d / %d C", mHeatSoakTracker.getPhase(),
+                                bed, mHeatSoakTracker.getTargetTemp());
+                    }
+                    emitHeatSoakStatus();
+                }, LogHelper::log);
+        mDisposables.add(mHeatSoakTicker);
+        emitHeatSoakStatus();
+    }
+
+    private void finishHeatSoakTracking(String reason) {
+        if (mHeatSoakTracker.isActive()) {
+            Logger.i("Leveling: heat soak display ended (%s), phase was %d", reason, mHeatSoakTracker.getPhase());
+            mHeatSoakTracker.finish();
+        }
+        stopHeatSoakTicker();
+        emitHeatSoakStatus();
+    }
+
+    private void stopHeatSoakTicker() {
+        if (mHeatSoakTicker != null) {
+            mHeatSoakTicker.dispose();
+            mDisposables.delete(mHeatSoakTicker);
+            mHeatSoakTicker = null;
+        }
+    }
+
+    /**
+     * User cancelled while the controller heats/soaks. Drops the pending start request first, so its
+     * failure reply (err 1 after the exit event aborts the soak) does not show the failure dialog.
+     * The caller then sends exit levelling (0x09 0x08), which aborts the soak in the controller.
+     */
+    public void cancelLeveling() {
+        Logger.i("Leveling: cancelled by user, heat soak phase %d", mHeatSoakTracker.getPhase());
+        mUserCancelled = true;
+        mDisposables.clear();
+        mHeatSoakTicker = null;
+        finishHeatSoakTracking("cancel");
+    }
+
+    public boolean isUserCancelled() {
+        return mUserCancelled;
     }
 
     public Observable<Boolean> getIsMovingObservable() {
@@ -105,13 +247,23 @@ public class CalibrationViewModel extends BaseViewModel {
     }
 
     public void startCalibration() {
+        mUserCancelled = false;
         mIsMovingSubject.onNext(true);
+
+        final int soakSeconds = LevelingParams.soakMinutesToSeconds(mSoakMinutes);
+        Logger.i("Leveling: start %s, grid %d, bed %d C, soak %d s", mIsAutoMode ? "auto" : "manual",
+                mGrid, mSoakBedTemperature, soakSeconds);
+        startHeatSoakTracking(soakSeconds);
+
         if (mIsAutoMode) {
             // listen auto calibration progress
             mDisposables.add(getModel().getSlaveComputer()
                     .getAutoCalibrationProgress()
+                    .observeOn(AndroidSchedulers.mainThread())
                     .subscribe(order -> {
                         Logger.d("Point %d calibrated.", order);
+                        // the first probed point means heating/soaking is over
+                        finishHeatSoakTracking("probing");
                         mCalibratedPointCount++;
 
                         moveToNextPoint();
@@ -119,8 +271,15 @@ public class CalibrationViewModel extends BaseViewModel {
                     }));
 
             mDisposables.add(getModel().getSlaveComputer()
-                    .startAutoCalibration(mGrid)
+                    .startAutoCalibration(mGrid, mSoakBedTemperature, soakSeconds)
+                    .observeOn(AndroidSchedulers.mainThread())
                     .subscribe(completed -> {
+                        finishHeatSoakTracking("auto reply");
+                        if (mUserCancelled) {
+                            Logger.i("Leveling: auto reply after cancel ignored");
+                            return;
+                        }
+                        Logger.i("Leveling: auto levelling %s", completed ? "done" : "failed");
                         if (completed) {
                             // Set ZOffset after auto calibration completed.
                             mAutoZOffsetSubject.onNext(true);
@@ -128,10 +287,12 @@ public class CalibrationViewModel extends BaseViewModel {
                             mIsMovingSubject.onNext(false);
                         } else {
                             // Auto calibration fail.
+                            mIsMovingSubject.onNext(false);
                             mAutoCalibrationResultSubject.onNext(false);
                         }
                     }, e -> {
                         LogHelper.log(e);
+                        finishHeatSoakTracking("auto error");
                         mIsMovingSubject.onNext(false);
                         mAutoCalibrationResultSubject.onNext(false);
                     }));
@@ -140,9 +301,20 @@ public class CalibrationViewModel extends BaseViewModel {
             mCurrentPoint = getPoint(mGrid, 1);
         } else {
             mDisposables.add(getModel().getSlaveComputer()
-                    .startManualCalibration(mGrid)
+                    .startManualCalibration(mGrid, mSoakBedTemperature, soakSeconds)
+                    .observeOn(AndroidSchedulers.mainThread())
                     .subscribe(completed -> {
+                        finishHeatSoakTracking("manual reply");
                         mIsMovingSubject.onNext(false);
+                        if (mUserCancelled) {
+                            Logger.i("Leveling: manual reply after cancel ignored");
+                            return;
+                        }
+                        if (!completed) {
+                            Logger.w("Leveling: manual levelling could not start");
+                            mAutoCalibrationResultSubject.onNext(false);
+                            return;
+                        }
                         // start with the corner
                         mCurrentPoint = getPoint(mGrid, 1);
                         if (mCurrentPoint != null) {
@@ -150,6 +322,7 @@ public class CalibrationViewModel extends BaseViewModel {
                         }
                     }, e -> {
                         LogHelper.log(e);
+                        finishHeatSoakTracking("manual error");
                         mIsMovingSubject.onNext(false);
                     }));
         }
@@ -222,7 +395,7 @@ public class CalibrationViewModel extends BaseViewModel {
      *                        onCreate... method of the fragment.
      */
     public void clearCalibrationPointData(boolean fragmentSurvive) {
-        if (fragmentSurvive) {
+        if (fragmentSurvive && mPoints != null) {
             mCalibratedPointCount = 0;
             mCurrentDir = 0;
             for (CalibrationPoint point : mPoints) {
@@ -376,6 +549,10 @@ public class CalibrationViewModel extends BaseViewModel {
     }
 
     public boolean isAllPointSelected() {
+        if (mPoints == null || mPoints.isEmpty()) {
+            // panel not set up yet (options dialog still open)
+            return false;
+        }
         for (CalibrationPoint point : mPoints) {
             if (!point.isSelected()) {
                 return false;

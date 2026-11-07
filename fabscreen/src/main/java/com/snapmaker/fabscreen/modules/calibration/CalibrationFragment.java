@@ -23,6 +23,9 @@ import butterknife.BindView;
 import butterknife.OnClick;
 import co.ceryle.segmentedbutton.SegmentedButtonGroup;
 import fabscreen.libraries.legacy.base.BaseFragment;
+import fabscreen.libraries.legacy.data.Constants;
+import fabscreen.libraries.legacy.data.calibration.HeatSoakTracker;
+import fabscreen.libraries.legacy.data.calibration.LevelingParams;
 import fabscreen.libraries.legacy.data.calibration.CalibrationPoint;
 import fabscreen.libraries.legacy.lib.LogHelper;
 import fabscreen.libraries.legacy.view.FabConfirm;
@@ -60,6 +63,17 @@ public class CalibrationFragment extends BaseFragment {
     @BindView(R.id.btn_calibration_save)
     Button mBtnSave;
 
+    @BindView(R.id.ll_calibration_heat_soak)
+    View mViewHeatSoak;
+    @BindView(R.id.tv_calibration_heat_soak_title)
+    TextView mTvHeatSoakTitle;
+    @BindView(R.id.tv_calibration_heat_soak_value)
+    TextView mTvHeatSoakValue;
+    @BindView(R.id.tv_calibration_heat_soak_desc)
+    TextView mTvHeatSoakDesc;
+    @BindView(R.id.btn_calibration_heat_soak_cancel)
+    Button mBtnHeatSoakCancel;
+
     private CalibrationViewModel mViewModel;
     private CalibrationPanelAdapter mAdapter;
 
@@ -78,7 +92,38 @@ public class CalibrationFragment extends BaseFragment {
 
         initView();
 
-        mViewModel.startCalibration();
+        showLevelingOptionsDialog();
+    }
+
+    /**
+     * Ask grid, bed temperature and soak time, then set up the panel and start levelling.
+     */
+    private void showLevelingOptionsDialog() {
+        // With the stock "heated leveling" switch on, the bed was pre-heated on the previous page: offer that value.
+        int bedTemp = mViewModel.getSoakBedTemperature();
+        if (mViewModel.isHeatedLevelingOn() && mViewModel.getHeatedLevelingTemperature() > 0) {
+            bedTemp = Math.round(mViewModel.getHeatedLevelingTemperature());
+        }
+        // The stock app offers no grid choice on the A150 (grid stays 3 there).
+        final boolean showGrid = getModel().getMachineController().getMachineModel() != Constants.MACHINE_MODEL_SNAPMAKER_A150;
+
+        LevelingOptionsDialog.create(getContext(), showGrid, mViewModel.getGridCount(), bedTemp, mViewModel.getSoakMinutes())
+                .setOnStartListener((grid, temp, soakMinutes) -> {
+                    mViewModel.setLevelingOptions(showGrid ? grid : mViewModel.getGridCount(), temp, soakMinutes);
+                    setupCalibrationPanel();
+                    mViewModel.startCalibration();
+                    if (!mViewModel.isAutoMode() && (mViewModel.isHeatedLevelingOn() || mViewModel.isHeatSoakUsed())) {
+                        showUpHeatedBedWarningDialog();
+                    }
+                })
+                .setOnCancelListener(() -> {
+                    // nothing started yet; only the stock pre-heat may have heated the bed
+                    if (mViewModel.isHeatedLevelingOn()) {
+                        mViewModel.turnOffBed();
+                    }
+                    requireActivity().finish();
+                })
+                .show();
     }
 
     @Override
@@ -101,7 +146,7 @@ public class CalibrationFragment extends BaseFragment {
                 .setConfirm(R.string.all_ok, (dialog, which) -> {
                     dialog.dismiss();
 
-                    if (mViewModel.isHeatedLevelingOn()) {
+                    if (mViewModel.isHeatedLevelingOn() || mViewModel.isHeatSoakUsed()) {
                         mViewModel.turnOffBed();
                     }
                     quitCalibration();
@@ -116,7 +161,6 @@ public class CalibrationFragment extends BaseFragment {
         mBtnSave.setText(needBackHome ? R.string.all_save : R.string.all_complete);
         boolean isAutoMode = mViewModel.isAutoMode();
         boolean isHeatedLeveling = mViewModel.isHeatedLevelingOn();
-        final int gridCount = mViewModel.getGridCount();
         if (isAutoMode) {
             setTitle(R.string.calibration_auto_leveling);
             mViewModel.getOffsetObservable()
@@ -126,27 +170,23 @@ public class CalibrationFragment extends BaseFragment {
                         mViewAdjustZOffset.setVisibility(isOffset ? View.VISIBLE : View.GONE);
                     });
 
-            mTvZOffsetHeatedBedWarning.setVisibility(isHeatedLeveling ? TextView.VISIBLE : TextView.GONE);
-            mIvZOffsetCover.setBackgroundResource(isHeatedLeveling ? R.drawable.pic_calibration_heated_leveling_adjust_zoffset_240x80
-                    : R.drawable.pic_calibration_adjust_zoffset_240x80);
+            // warning/picture are set again in setupCalibrationPanel() once the heat soak choice is known
+            updateZOffsetHeatedBedWarning(isHeatedLeveling);
         } else {
             setTitle(R.string.calibration_manual_leveling);
-
-            if (isHeatedLeveling) {
-                showUpHeatedBedWarningDialog();
-            }
+            // the heated bed warning is shown after the levelling options dialog (showLevelingOptionsDialog)
         }
         mBtnNextPoint.setVisibility(isAutoMode ? View.GONE : View.VISIBLE);
-        bindButtons();
 
+        // points are added by setupCalibrationPanel() after the options dialog
         mAdapter = new CalibrationPanelAdapter(getContext());
-        ArrayList<CalibrationPoint> points = mViewModel.initPoints();
-        mAdapter.setPoints(points);
         mAdapter.setOnPointClickListener(point -> {
             mViewModel.gotoPointManual(point.getCoordinateOrder());
         });
 
-        initCalibrationPanel(gridCount);
+        bindButtons();
+
+        bindHeatSoak();
 
         Observable
                 .combineLatest(mViewModel.getUpdatePointsObservable(),
@@ -166,11 +206,101 @@ public class CalibrationFragment extends BaseFragment {
                 });
     }
 
+    private void updateZOffsetHeatedBedWarning(boolean heated) {
+        mTvZOffsetHeatedBedWarning.setVisibility(heated ? TextView.VISIBLE : TextView.GONE);
+        mIvZOffsetCover.setBackgroundResource(heated ? R.drawable.pic_calibration_heated_leveling_adjust_zoffset_240x80
+                : R.drawable.pic_calibration_adjust_zoffset_240x80);
+    }
+
+    /**
+     * Points panel for the chosen grid (3x3..11x11). Up to 7x7 the stock 40 dp cells fit the 280 dp panel;
+     * above that the cells shrink to 280/grid dp (25 dp at 11x11) and the index labels are hidden.
+     */
+    private void setupCalibrationPanel() {
+        final int gridCount = mViewModel.getGridCount();
+        ArrayList<CalibrationPoint> points = mViewModel.initPoints();
+        mAdapter.setPoints(points);
+        initCalibrationPanel(gridCount);
+
+        if (mViewModel.isAutoMode()) {
+            updateZOffsetHeatedBedWarning(mViewModel.isHeatedLevelingOn() || mViewModel.isHeatSoakUsed());
+        }
+        Logger.i("Leveling: panel %d x %d (%d points)", gridCount, gridCount, points.size());
+    }
+
+    /**
+     * Show the heat soak progress (heating, soak countdown, waiting for measuring) with a Cancel button.
+     * The Back button stays disabled while the controller is busy, so Cancel is the only way out.
+     */
+    private void bindHeatSoak() {
+        mViewModel.getHeatSoakStatusObservable()
+                .observeOn(AndroidSchedulers.mainThread())
+                .as(bindToLifecycle())
+                .subscribe(status -> {
+                    mViewHeatSoak.setVisibility(status.isActive() ? View.VISIBLE : View.GONE);
+                    if (!status.isActive()) {
+                        return;
+                    }
+                    switch (status.phase) {
+                        case HeatSoakTracker.PHASE_HEATING:
+                            mTvHeatSoakTitle.setText(R.string.calibration_heat_soak_heating);
+                            mTvHeatSoakValue.setText(getString(R.string.calibration_heat_soak_temp_value,
+                                    status.bedTemperature, status.targetTemperature));
+                            if (status.soakSeconds > 0) {
+                                mTvHeatSoakDesc.setText(getString(R.string.calibration_heat_soak_heating_desc,
+                                        LevelingParams.formatCountdown(status.soakSeconds)));
+                            } else {
+                                mTvHeatSoakDesc.setText(R.string.calibration_heat_soak_heating_no_soak_desc);
+                            }
+                            break;
+                        case HeatSoakTracker.PHASE_SOAKING:
+                            mTvHeatSoakTitle.setText(getString(R.string.calibration_heat_soak_soaking,
+                                    status.targetTemperature));
+                            mTvHeatSoakValue.setText(LevelingParams.formatCountdown(status.secondsLeft));
+                            mTvHeatSoakDesc.setText(getString(R.string.calibration_heat_soak_soaking_desc,
+                                    status.bedTemperature));
+                            break;
+                        case HeatSoakTracker.PHASE_WAITING:
+                        default:
+                            mTvHeatSoakTitle.setText(R.string.calibration_heat_soak_waiting);
+                            mTvHeatSoakValue.setText(getString(R.string.calibration_heat_soak_temp_value,
+                                    status.bedTemperature, status.targetTemperature));
+                            mTvHeatSoakDesc.setText(R.string.calibration_heat_soak_waiting_desc);
+                            break;
+                    }
+                });
+
+        mBtnHeatSoakCancel.setOnClickListener(v -> FabConfirm.create(getContext())
+                .setCanceledOnTouchOutSide(false)
+                .setDescription(R.string.calibration_heat_soak_cancel_confirm_desc)
+                .setConfirm(R.string.all_ok, (dialog, which) -> {
+                    dialog.dismiss();
+                    mBtnHeatSoakCancel.setEnabled(false);
+                    // drop the pending request first, then exit levelling aborts the soak in the controller
+                    // (the controller also turns the bed off)
+                    mViewModel.cancelLeveling();
+                    quitCalibration();
+                })
+                .setCancel(R.string.all_cancel, (dialog, which) -> dialog.dismiss())
+                .show());
+    }
+
     private void showAutoCalibrationFailDialog() {
+        if (mViewModel.isUserCancelled()) {
+            return;
+        }
+        final int desc;
+        if (!mViewModel.isAutoMode()) {
+            desc = R.string.calibration_dialog_leveling_start_fail_desc;
+        } else if (mViewModel.isHeatSoakUsed()) {
+            desc = R.string.calibration_dialog_heat_soak_leveling_fail_desc;
+        } else {
+            desc = R.string.calibration_dialog_auto_calibration_fail_desc;
+        }
         FabConfirm.create(getContext())
                 .setCanceledOnTouchOutSide(false)
                 .setIcon(R.drawable.pic_dialog_warning_72x72)
-                .setDescription(R.string.calibration_dialog_auto_calibration_fail_desc)
+                .setDescription(desc)
                 .setConfirm(R.string.all_retry, (dialog, which) -> {
                     dialog.dismiss();
                     //retry
@@ -180,6 +310,9 @@ public class CalibrationFragment extends BaseFragment {
                 .setCancel(R.string.all_quit, (dialog, which) -> {
                     dialog.dismiss();
                     //quit
+                    if (mViewModel.isHeatedLevelingOn() || mViewModel.isHeatSoakUsed()) {
+                        mViewModel.turnOffBed();
+                    }
                     quitCalibration();
                 })
                 .show();
@@ -193,11 +326,15 @@ public class CalibrationFragment extends BaseFragment {
     }
 
     private void initCalibrationPanel(int gridCount) {
-        mGvCalibrationPanel.setAdapter(mAdapter);
+        // 40 dp cells (stock) up to 7x7, smaller cells above so that 11 columns still fit in 280 dp.
+        final int cellDp = Math.min(40, 280 / gridCount);
+        mAdapter.setCellSize(dp2px(cellDp), cellDp >= 36);
+        mGvCalibrationPanel.setColumnWidth(dp2px(cellDp));
         mGvCalibrationPanel.setNumColumns(gridCount);
+        mGvCalibrationPanel.setAdapter(mAdapter);
 
         // Use gridCount to calculate spacing.
-        final int spacing = (280 - (40 * gridCount)) / (gridCount - 1);
+        final int spacing = Math.max(0, (280 - (cellDp * gridCount)) / (gridCount - 1));
         mGvCalibrationPanel.setVerticalSpacing(dp2px(spacing));
         mGvCalibrationPanel.setHorizontalSpacing(dp2px(spacing));
         switch (gridCount) {
@@ -208,8 +345,11 @@ public class CalibrationFragment extends BaseFragment {
                 mGvCalibrationPanel.setBackgroundResource(R.drawable.pic_3dp_calibration_25point_280x280);
                 break;
             case 3:
-            default:
                 mGvCalibrationPanel.setBackgroundResource(R.drawable.pic_3dp_calibration_9point_280x280);
+                break;
+            default:
+                // no picture for 6x6..11x11
+                mGvCalibrationPanel.setBackground(null);
                 break;
         }
     }
@@ -285,8 +425,11 @@ public class CalibrationFragment extends BaseFragment {
                         // Set temperature into preferences.
                         final float heatedLevelingTemp = mViewModel.getHeatedLevelingTemperature();
                         getModel().getPreferences().set3DPCalibrationHeatedUpTemperature(heatedLevelingTemp);
-
-                        // Turn off heated bed for safe when calibration was done already.
+                    }
+                    if (mViewModel.isHeatedLevelingOn() || mViewModel.isHeatSoakUsed()) {
+                        // Turn off heated bed for safe when calibration was done already
+                        // (the controller keeps the soak temperature after levelling).
+                        Logger.i("Leveling: saved, turning the bed off");
                         mViewModel.turnOffBed();
                     }
 

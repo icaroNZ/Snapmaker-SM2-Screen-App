@@ -78,6 +78,57 @@
                 android:visibility="gone" />
         </RelativeLayout>
 
+        <!-- Heat soak progress (controller heats/soaks the bed before measuring; no progress packets meanwhile) -->
+        <LinearLayout
+            android:id="@+id/ll_calibration_heat_soak"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="@color/default_theme_primary"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <TextView
+                android:id="@+id/tv_calibration_heat_soak_title"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="@dimen/margin_layout_20"
+                android:layout_marginEnd="@dimen/margin_layout_20"
+                android:textAlignment="center"
+                android:textColor="@color/default_theme_desc1"
+                android:textSize="@dimen/font_size_h4" />
+
+            <TextView
+                android:id="@+id/tv_calibration_heat_soak_value"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/margin_layout_10"
+                android:textAlignment="center"
+                android:textColor="@color/default_theme_title"
+                android:textSize="@dimen/font_size_h2" />
+
+            <TextView
+                android:id="@+id/tv_calibration_heat_soak_desc"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="@dimen/margin_layout_20"
+                android:layout_marginTop="@dimen/margin_layout_10"
+                android:layout_marginEnd="@dimen/margin_layout_20"
+                android:textAlignment="center"
+                android:textColor="@color/default_theme_desc1"
+                android:textSize="@dimen/font_size_h6" />
+
+            <Button
+                android:id="@+id/btn_calibration_heat_soak_cancel"
+                style="@style/AppTheme.Button.StopButton"
+                android:layout_width="160dp"
+                android:layout_height="@dimen/height_button_45"
+                android:layout_marginTop="@dimen/margin_layout_20"
+                android:text="@string/calibration_heat_soak_cancel" />
+        </LinearLayout>
+
     </FrameLayout>
 
     <RelativeLayout
