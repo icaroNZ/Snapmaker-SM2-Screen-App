@@ -31,9 +31,10 @@ import okio.ByteString;
 public class DiscoverServer extends Thread {
     private static final int BIND_PORT = 20054;
     private static final String DISCOVER_MESSAGE = "discover";
+    private static final long BIND_RETRY_MS = 5000;
 
     private WifiManager mWifiManager;
-    private DatagramSocket mSocket;
+    private volatile DatagramSocket mSocket;
 
     /**
      * DiscoverServer: bind socket and wait for client to search
@@ -44,46 +45,104 @@ public class DiscoverServer extends Thread {
         mWifiManager = (WifiManager) context.getApplicationContext().getSystemService(Context.WIFI_SERVICE);
     }
 
+    /**
+     * SCR-21: the thread used to die for good on the first IOException (bind, receive or send), so
+     * discovery stopped until the app restarted. Now binding is retried every 5 s, a failed send
+     * only skips that reply, and a failed socket is re-bound.
+     */
     public void run() {
-        try {
-            mSocket = new DatagramSocket(BIND_PORT);
+        while (!isInterrupted()) {
+            DatagramSocket socket;
+            try {
+                socket = new DatagramSocket(BIND_PORT);
+                mSocket = socket;
+                Logger.i("Discovery: bound UDP %d", BIND_PORT);
+            } catch (IOException e) {
+                Logger.w("Discovery: bind UDP %d failed (%s), retrying in %d s", BIND_PORT, e, BIND_RETRY_MS / 1000);
+                if (!sleepQuietly(BIND_RETRY_MS)) {
+                    break;
+                }
+                continue;
+            }
 
-            byte[] data = new byte[64];
-            DatagramPacket packet = new DatagramPacket(data, data.length);
-            while (true) {
-                mSocket.receive(packet);
+            serve(socket);
+            socket.close();
+            mSocket = null;
 
-                String message = new String(data, 0, packet.getLength(), Charset.forName("UTF-8"));
-
-                if (message.equals(DISCOVER_MESSAGE)) {
-                    byte[] bytes = getResponse();
-                    SocketAddress address = packet.getSocketAddress();
-                    DatagramPacket sendPacket = new DatagramPacket(bytes, bytes.length, address);
-                    mSocket.send(sendPacket);
-                    Logger.d("Discover request, response sent.");
+            if (!isInterrupted()) {
+                Logger.w("Discovery: socket failed, re-binding");
+                if (!sleepQuietly(1000)) {
+                    break;
                 }
             }
-        } catch (IOException e) {
-            LogHelper.log(e);
-        } finally {
-            if (mSocket != null) {
-                mSocket.close();
-                mSocket = null;
+        }
+        Logger.e("Discovery stopped");
+    }
+
+    private void serve(DatagramSocket socket) {
+        byte[] data = new byte[64];
+        DatagramPacket packet = new DatagramPacket(data, data.length);
+        while (!isInterrupted()) {
+            try {
+                packet.setLength(data.length); // receive() shrinks it to the last datagram
+                socket.receive(packet);
+            } catch (IOException e) {
+                if (!isInterrupted()) {
+                    Logger.w("Discovery: receive failed: %s", e);
+                }
+                return;
+            }
+
+            String message = new String(data, 0, packet.getLength(), Charset.forName("UTF-8"));
+            if (!message.equals(DISCOVER_MESSAGE)) {
+                continue;
+            }
+
+            SocketAddress address = packet.getSocketAddress();
+            try {
+                String ip = getHostAddress();
+                if (!hasUsableAddress(ip)) {
+                    Logger.d("Discovery: no IP address yet, not answering %s", address);
+                    continue;
+                }
+                byte[] bytes = getResponse(ip);
+                socket.send(new DatagramPacket(bytes, bytes.length, address));
+                Logger.d("Discover request, response sent.");
+            } catch (IOException e) {
+                Logger.w("Discovery: reply to %s failed: %s", address, e);
+            } catch (RuntimeException e) {
+                Logger.e("Discovery: building the reply for %s failed: %s", address, e);
             }
         }
     }
 
+    private boolean sleepQuietly(long ms) {
+        try {
+            Thread.sleep(ms);
+            return true;
+        } catch (InterruptedException e) {
+            interrupt();
+            return false;
+        }
+    }
+
+    /** Whether {@code ip} is an address a client can connect to (not 0.0.0.0 / empty). */
+    static boolean hasUsableAddress(String ip) {
+        return ip != null && !ip.isEmpty() && !ip.equals("0.0.0.0");
+    }
+
     @Override
     public void interrupt() {
-        if (mSocket != null) {
-            mSocket.close();
-            mSocket = null;
+        DatagramSocket socket = mSocket;
+        mSocket = null;
+        if (socket != null) {
+            socket.close();
         }
 
         super.interrupt();
     }
 
-    private byte[] getResponse() {
+    private byte[] getResponse(String hostAddress) {
         Model model = BaseApplication.getInstance().getModel();
 
         final String machineName = model.getPreferences().getMachineName();
@@ -93,7 +152,7 @@ public class DiscoverServer extends Thread {
         // Build response string
         // {name}@{ip}|model:{model}|status:{status}
         StringBuilder stringBuilder = new StringBuilder();
-        stringBuilder.append(String.format("%s@%s", machineName, getHostAddress()));
+        stringBuilder.append(String.format("%s@%s", machineName, hostAddress));
         stringBuilder.append(String.format("|%s:%s", "model", machineModal));
 
         if (status.printerStatus == 0) {
@@ -116,7 +175,7 @@ public class DiscoverServer extends Thread {
         return intToIp(wifiInfo.getIpAddress());
     }
 
-    private static String intToIp(int ipAddress) {
+    static String intToIp(int ipAddress) {
         return (ipAddress & 0xFF) + "." +
                 ((ipAddress >> 8) & 0xFF) + "." +
                 ((ipAddress >> 16) & 0xFF) + "." +
