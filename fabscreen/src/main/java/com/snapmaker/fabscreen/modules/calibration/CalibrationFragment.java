@@ -277,8 +277,11 @@ public class CalibrationFragment extends BaseFragment {
                     dialog.dismiss();
                     mBtnHeatSoakCancel.setEnabled(false);
                     // drop the pending request first, then exit levelling aborts the soak in the controller
-                    // (the controller also turns the bed off)
+                    // (the controller turns the bed off only when it is still heating/soaking)
                     mViewModel.cancelLeveling();
+                    // If the soak already ended (controller homing/probing), the controller keeps the bed at
+                    // temperature, so turn it off here too (harmless if already off).
+                    mViewModel.turnOffBed();
                     quitCalibration();
                 })
                 .setCancel(R.string.all_cancel, (dialog, which) -> dialog.dismiss())
