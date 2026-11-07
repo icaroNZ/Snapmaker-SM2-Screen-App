@@ -28,10 +28,24 @@ and **UDP discovery on 20054** that Luban, Snapmaker Orca and the Cura plugin us
   auto mode when the controller version is a250t.4+ and the query answers (3 s timeouts); otherwise the stock page and
   bytes. Pure-Java helper `L/data/calibration/ZOffsetParams.java`, tests `ZOffsetPacketTest`. Notes:
   `../_snapmaker2-review/features/mesh-zoffset-Snapmaker-SM2-Screen-App.md`. CI run 42343602663: green, 94 unit tests.
+- Fix pass (07/11/2026, commits `49a5797`..`2f5a6f5`, fix list `../_snapmaker2-review/issues/Snapmaker-SM2-Screen-App.md`
+  section "Fix pass"): SSTP reader growth/resync (lengths 0 or >1024 skipped), reader/writer survive bad frames,
+  global `RxJavaPlugins` handler, unsigned `FabPacket.getKey()` (0xa9/0xaa sub-commands now have distinct keys),
+  batch resend keeps blank lines and never sends an accidental empty (= end-of-file) batch (pure `BatchAssembler`),
+  read errors / over-long lines pause the job, 9 batches kept, pending requests fail on link loss, M5 when the
+  laser/CNC Control page is left, firmware update asks before deleting files, HTTP hardening (below), discovery
+  retries. Pure helpers: `L/server/http/HttpGate.java` (also holds the HTTP security switches),
+  `L/data/print/BatchAssembler.java`, `L/data/serial/fabpacket/FrameDiagnostics.java`, `L/lib/RxErrorPolicy.java`,
+  `L/lib/update/UpdateSpace.java`, `L/lib/fabserver/HttpErrorFilter.java`. CI run 42351369013: green, 192 unit tests
+  (96 per variant x debug/release).
 - No licence ("TBD"). CI: `.github/workflows/a250t-build.yml` (ours, ubuntu-22.04, JDK 8, NDK 22.1.7171670; runs
   `assembleDebug` + `test`, uploads the debug APKs; CI-only `.github/ci/repos.init.gradle` puts google()/mavenCentral()
   before the Aliyun mirrors). It passed on icaroNZ/Snapmaker-SM2-Screen-App run 42321848947 (07/11/2026): assembleDebug OK, 16/16 unit tests; APK artifact `fabscreen-debug-apks` (debug-signed, do not install on the real screen). Real JVM test classes in `fabscreen/src/test/java/com/snapmaker/fabscreen/`: `FabPacketTest`
-  (frame round-trip, checksum vectors, stream reader), `LevelingPacketTest`, `HeatSoakTrackerTest`, `ZOffsetPacketTest`; the other test files are Android Studio placeholders.
+  (frame round-trip, checksum vectors, stream reader), `LevelingPacketTest`, `HeatSoakTrackerTest`, `ZOffsetPacketTest`,
+  `SerialRobustnessTest`, `HttpGateTest`, `HttpErrorFilterTest`, `RequestReceiverTest`, `UpdateSpaceTest`,
+  `modules/control/ToolPowerGuardTest`; package-private ones under `fabscreen/src/test/java/fabscreen/libraries/legacy/`:
+  `data/print/BatchAssemblerTest`, `data/print/OnAirGcodeModifierTest`, `server/socket/DiscoverServerTest`. The other
+  test files are Android Studio placeholders. `fabscreen/build.gradle` sets `unitTests.returnDefaultValues = true`.
 
 ### Tech stack
 Java 8 (603 files), Android compileSdk/targetSdk 28, minSdk 23 (stock screen runs SDK 25), AGP 3.5.3, Gradle wrapper
@@ -49,7 +63,7 @@ cd /Users/icaro/Documents/Projects/SnapMaker/Snapmaker-SM2-Screen-App
 export JAVA_HOME=$(/usr/libexec/java_home -v 1.8)
 cp fabscreen/google-services.json.example fabscreen/google-services.json   # or remove the 2 Firebase plugins
 ./gradlew assembleDebug        # -> fabscreen/build/outputs/apk/debug/fabscreen-release_V1.19.3.apk (name set in fabscreen/build.gradle:9-13)
-./gradlew test                 # FabPacketTest (4 tests) + placeholder ExampleUnitTests
+./gradlew test                 # 96 tests per variant (debug + release = 192 in CI run 42351369013)
 ```
 See skill `screen-build-test` for details and failure modes. Debug builds inject `MockSlaveComputer`
 (`data/Model.java:43-44`, reports an A250) so the UI, HTTP API and update flow run in an emulator without hardware.
@@ -131,6 +145,24 @@ See skill `screen-build-test` for details and failure modes. Debug builds inject
 - `POST /api/files/local`, `GET /api/version`, `GET /` (`OrcaRequestHandler.java`) and the camera routes are
   **unauthenticated**; `/api/files/local?print=true` only starts FDM jobs.
 - `/api/v1/status` `toolHead` key is deprecated (comment in code) - use `headType` from connect.
+- Since the fix pass (07/11/2026; switches are build-time constants in `L/server/http/HttpGate.java`):
+  - No `Access-Control-Allow-Origin: *` any more; any request a browser marks cross-site (`Origin` header or
+    `Sec-Fetch-Site: cross-site|same-site`) gets 403 (`REJECT_BROWSER_CROSS_SITE_REQUESTS`, ON). Native clients
+    (Orca, Cura, curl, Luban's node server) send neither header.
+  - `/api/request_Laser_Material_Thickness` needs `?token=`, a laser head and an idle machine (409); F clamped 100..6000.
+  - `/api/request_capture_photo`, `/api/set_camera_calibration_matrix`, `/api/set_10w_laser_camera_calibration_matrix`
+    need `?token=` (`REQUIRE_TOKEN_FOR_LEGACY_CAMERA_ROUTES`, ON); capture also 409 when busy. **Luban's
+    `image-getPhoto.js` sends no token**, so Luban Wi-Fi camera capture needs a Luban change or the switch OFF.
+  - `prepare_print` answers 409 while a job is starting/printing/paused/resuming/recovering; 400 on a parse failure;
+    504 after 120 s. File names are sanitised (directory part dropped, `.`/`..`/dot/control chars refused).
+  - `/api/files/local` (OctoPrint): sanitised name, busy check is status OR job state, parse failure = 503 and no
+    jump to the print page, 504 after 150 s; optional token (`?token=` or `X-Api-Key`) behind
+    `REQUIRE_TOKEN_FOR_OCTOPRINT_UPLOAD` (OFF until the owner's Orca host type is known).
+  - start/pause/resume/stop (30 s), execute_code and filament load/unload (120 s), override_laser_power (30 s):
+    504 on timeout, 500 on a serial error (they used to hang the HTTP thread).
+  - Multipart uploads that would leave < 32 MB free get 413; the server never deletes stored files to make room.
+  - `override_laser_power` accepts 20W/40W/2W IR during a job (idle `M3 P` path still 1.6W/10W only); status reports
+    laser fields for every laser head.
 
 ### A250T-specific notes
 - No A250T model exists in the app: `getMachineSize` model byte is 1/2/3 (A150/A250/A350); A250T == A250 everywhere
