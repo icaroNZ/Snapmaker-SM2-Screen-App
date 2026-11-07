@@ -6,6 +6,11 @@ android {
     defaultConfig {
         versionName "V1.19.3"
     }
+    // Host unit tests exercise library classes that log through orhanobut Logger / android.util;
+    // return defaults from the android.jar stubs instead of throwing "Method ... not mocked".
+    testOptions {
+        unitTests.returnDefaultValues = true
+    }
     // apk name def
     android.applicationVariants.all { variant ->
         variant.outputs.all {
