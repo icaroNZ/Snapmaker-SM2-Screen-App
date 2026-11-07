@@ -36,8 +36,9 @@ and **UDP discovery on 20054** that Luban, Snapmaker Orca and the Cura plugin us
   laser/CNC Control page is left, firmware update asks before deleting files, HTTP hardening (below), discovery
   retries. Pure helpers: `L/server/http/HttpGate.java` (also holds the HTTP security switches),
   `L/data/print/BatchAssembler.java`, `L/data/serial/fabpacket/FrameDiagnostics.java`, `L/lib/RxErrorPolicy.java`,
-  `L/lib/update/UpdateSpace.java`, `L/lib/fabserver/HttpErrorFilter.java`. CI run 42351369013: green, 192 unit tests
-  (96 per variant x debug/release).
+  `L/lib/update/UpdateSpace.java`, `L/lib/fabserver/HttpErrorFilter.java`. The 1024-byte SSTP frame cap applies to
+  the controller UART only (`LaserCameraController`'s Bluetooth link uses the uncapped default). CI run 42352058076:
+  green, 194 unit tests (97 per variant x debug/release).
 - No licence ("TBD"). CI: `.github/workflows/a250t-build.yml` (ours, ubuntu-22.04, JDK 8, NDK 22.1.7171670; runs
   `assembleDebug` + `test`, uploads the debug APKs; CI-only `.github/ci/repos.init.gradle` puts google()/mavenCentral()
   before the Aliyun mirrors). It passed on icaroNZ/Snapmaker-SM2-Screen-App run 42321848947 (07/11/2026): assembleDebug OK, 16/16 unit tests; APK artifact `fabscreen-debug-apks` (debug-signed, do not install on the real screen). Real JVM test classes in `fabscreen/src/test/java/com/snapmaker/fabscreen/`: `FabPacketTest`
@@ -63,7 +64,7 @@ cd /Users/icaro/Documents/Projects/SnapMaker/Snapmaker-SM2-Screen-App
 export JAVA_HOME=$(/usr/libexec/java_home -v 1.8)
 cp fabscreen/google-services.json.example fabscreen/google-services.json   # or remove the 2 Firebase plugins
 ./gradlew assembleDebug        # -> fabscreen/build/outputs/apk/debug/fabscreen-release_V1.19.3.apk (name set in fabscreen/build.gradle:9-13)
-./gradlew test                 # 96 tests per variant (debug + release = 192 in CI run 42351369013)
+./gradlew test                 # 97 tests per variant (debug + release = 194 in CI run 42352058076)
 ```
 See skill `screen-build-test` for details and failure modes. Debug builds inject `MockSlaveComputer`
 (`data/Model.java:43-44`, reports an A250) so the UI, HTTP API and update flow run in an emulator without hardware.
