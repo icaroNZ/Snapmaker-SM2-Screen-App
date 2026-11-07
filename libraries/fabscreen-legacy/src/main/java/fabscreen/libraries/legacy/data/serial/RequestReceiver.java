@@ -7,6 +7,10 @@ import java.util.Queue;
 
 import io.reactivex.ObservableEmitter;
 
+/**
+ * Queue of emitters waiting for replies with one key. Methods are synchronized (SCR-18): requests
+ * are added from the main/computation threads while replies arrive on the serial reader thread.
+ */
 public class RequestReceiver {
     private int key;
     private Queue<ObservableEmitter<Object>> mEmitterQueue = new LinkedList<>();
@@ -16,19 +20,19 @@ public class RequestReceiver {
         this.key = key;
     }
 
-    public int size() {
+    public synchronized int size() {
         return mEmitterQueue.size();
     }
 
-    public void setDefaultEmitter(ObservableEmitter<Object> emitter) {
+    public synchronized void setDefaultEmitter(ObservableEmitter<Object> emitter) {
         mDefaultEmitter = emitter;
     }
 
-    public void addEmitter(ObservableEmitter<Object> emitter) {
+    public synchronized void addEmitter(ObservableEmitter<Object> emitter) {
         mEmitterQueue.add(emitter);
     }
 
-    public void receive(Object data) {
+    public synchronized void receive(Object data) {
         if (mEmitterQueue.isEmpty()) {
             if (mDefaultEmitter != null) {
                 mDefaultEmitter.onNext(data);
@@ -57,19 +61,50 @@ public class RequestReceiver {
         }
     }
 
-    public void error(Throwable error) {
+    public synchronized void error(Throwable error) {
         if (mEmitterQueue.isEmpty()) {
             if (mDefaultEmitter != null) {
                 mDefaultEmitter.onError(error);
             }
         } else {
-            ObservableEmitter<Object> emitter = mEmitterQueue.remove();
-
-            emitter.onError(error);
+            // SCR-14: skip requests that were already cancelled (timeout/dispose), as receive() does.
+            while (!mEmitterQueue.isEmpty()) {
+                ObservableEmitter<Object> emitter = mEmitterQueue.remove();
+                if (emitter.isDisposed()) {
+                    Logger.d("Found emitter disposed, skip.");
+                    continue;
+                }
+                emitter.tryOnError(error);
+                break;
+            }
         }
     }
 
-    public void complete() {
+    /**
+     * SCR-14: fail every queued request (not the default watcher). Called when the serial link is
+     * lost: the pending requests were dropped silently, so untimed requests (levelling, Z offset)
+     * waited for ever and locked their page.
+     *
+     * @return the number of live requests that were failed
+     */
+    public synchronized int errorAll(Throwable error) {
+        int failed = 0;
+        while (!mEmitterQueue.isEmpty()) {
+            ObservableEmitter<Object> emitter = mEmitterQueue.remove();
+            if (emitter.isDisposed()) {
+                continue;
+            }
+            emitter.tryOnError(error);
+            failed++;
+        }
+        return failed;
+    }
+
+    public int getKey() {
+        return key;
+    }
+
+    public synchronized void complete() {
         if (mEmitterQueue.isEmpty()) {
             if (mDefaultEmitter != null) {
                 mDefaultEmitter.onComplete();

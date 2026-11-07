@@ -134,6 +134,8 @@ public class SerialController implements ISlaveComputer {
                     .subscribe(t -> {
                         long time = SystemClock.elapsedRealtime();
                         if (time - mLastReceiveTimeMillis > Constants.HEARTBEAT_INTERVAL) {
+                            Logger.w("Serial: heartbeat timeout, %d ms since last frame, disconnecting",
+                                    time - mLastReceiveTimeMillis);
                             disconnect();
                         }
                     });
@@ -202,7 +204,62 @@ public class SerialController implements ISlaveComputer {
 
         mDisposables.clear();
 
-        mReceivers.clear();
+        failPendingRequests("serial disconnect");
+        synchronized (mReceivers) {
+            mReceivers.clear();
+        }
+    }
+
+    /**
+     * Receiver for {@code key}, created on first use. The map lock is never held while calling into a
+     * RequestReceiver (SCR-18: replies arrive on the reader thread, requests on other threads).
+     */
+    private RequestReceiver obtainReceiver(int key) {
+        synchronized (mReceivers) {
+            RequestReceiver receiver = mReceivers.get(key);
+            if (receiver == null) {
+                receiver = new RequestReceiver(key);
+                mReceivers.put(key, receiver);
+            }
+            return receiver;
+        }
+    }
+
+    private RequestReceiver getReceiver(int key) {
+        synchronized (mReceivers) {
+            return mReceivers.get(key);
+        }
+    }
+
+    private List<RequestReceiver> snapshotReceivers() {
+        synchronized (mReceivers) {
+            List<RequestReceiver> list = new ArrayList<>(mReceivers.size());
+            for (int i = 0; i < mReceivers.size(); i++) {
+                list.add(mReceivers.valueAt(i));
+            }
+            return list;
+        }
+    }
+
+    /**
+     * SCR-14: fail every pending request when the link goes away. They used to be dropped
+     * silently (mReceivers.clear()), so untimed requests (levelling, Z offset) waited for ever and
+     * locked their page with Back disabled.
+     */
+    private void failPendingRequests(String reason) {
+        int failed = 0;
+        StringBuilder keys = new StringBuilder();
+        FabException error = new FabException("Serial link lost (" + reason + ")");
+        for (RequestReceiver receiver : snapshotReceivers()) {
+            int n = receiver.errorAll(error);
+            if (n > 0) {
+                failed += n;
+                keys.append(String.format(Locale.US, " 0x%X", receiver.getKey()));
+            }
+        }
+        if (failed > 0) {
+            Logger.w("Serial: %s, failing %d pending request(s):%s", reason, failed, keys);
+        }
     }
 
     private Observable<Object> watch(FabPacket packet) {
@@ -219,13 +276,7 @@ public class SerialController implements ISlaveComputer {
                 return;
             }
 
-            RequestReceiver receiver = mReceivers.get(key);
-            if (receiver == null) {
-                receiver = new RequestReceiver(key);
-                mReceivers.put(packet.getKey(), receiver);
-            }
-
-            receiver.setDefaultEmitter(emitter);
+            obtainReceiver(key).setDefaultEmitter(emitter);
         });
     }
 
@@ -256,12 +307,7 @@ public class SerialController implements ISlaveComputer {
                 return;
             }
 
-            RequestReceiver receiver = mReceivers.get(key);
-            if (receiver == null) {
-                receiver = new RequestReceiver(key);
-                mReceivers.put(key, receiver);
-            }
-            receiver.addEmitter(emitter);
+            obtainReceiver(key).addEmitter(emitter);
 
             // Check send 0x09 0x14
             if (packet.getEventId() == FabPacket.SETTINGS_REQUEST_EVENT_ID && Arrays.equals(packet.getContent(), new byte[]{(byte) 0x14})) {
@@ -1125,6 +1171,7 @@ public class SerialController implements ISlaveComputer {
             sharedPref.edit().putString("SERIAL_PORT_PATH", mDevice).apply();
         } else {
             mDevice = null;
+            failPendingRequests("link down");
             mConnectedSubject.onNext(false);
             mMachineStatusSubject.onNext(FabPacketContent.MachineStatus.getDefaultInstance());
             onMachineValidValueChanged(true); // reset subject
@@ -1212,7 +1259,7 @@ public class SerialController implements ISlaveComputer {
                         // TODO:
                         FabPacketContent.MachineErrors machineErrors = FabPacketContent.MachineErrors.parse(packet.getContent());
                         if (machineErrors != null) {
-                            RequestReceiver receiver = mReceivers.get(packet.getKey());
+                            RequestReceiver receiver = getReceiver(packet.getKey());
                             if (receiver != null) {
                                 receiver.receive(machineErrors);
                             }
@@ -1229,7 +1276,7 @@ public class SerialController implements ISlaveComputer {
                     case 0x0b:
                     case 0x0c:
                     case 0x12: {
-                        RequestReceiver receiver = mReceivers.get(packet.getKey());
+                        RequestReceiver receiver = getReceiver(packet.getKey());
                         if (receiver != null) {
                             receiver.receive(packet.getContent()[1] & 0xff);
                         } else {
@@ -1259,7 +1306,7 @@ public class SerialController implements ISlaveComputer {
                         try {
                             buffer.readByte();
                             final int progress = buffer.readInt();
-                            RequestReceiver receiver = mReceivers.get(packet.getKey());
+                            RequestReceiver receiver = getReceiver(packet.getKey());
                             if (receiver != null) {
                                 receiver.receive(progress);
                             }
@@ -1292,7 +1339,7 @@ public class SerialController implements ISlaveComputer {
                         break;
                     }
                     case 0x11: {
-                        RequestReceiver receiver = mReceivers.get(packet.getKey());
+                        RequestReceiver receiver = getReceiver(packet.getKey());
                         FabPacketContent.HeaderSecurity headerSecurity = FabPacketContent.HeaderSecurity.parse(packet.getContent());
                         if (receiver != null) {
                             receiver.receive(headerSecurity);
@@ -1335,7 +1382,7 @@ public class SerialController implements ISlaveComputer {
                         } else {
                             Logger.w("Leveling: 0x0a 0x02 failed, %s", reply);
                         }
-                        RequestReceiver receiver = mReceivers.get(packet.getKey());
+                        RequestReceiver receiver = getReceiver(packet.getKey());
                         if (receiver != null) {
                             receiver.receive(reply);
                         }
@@ -1345,7 +1392,7 @@ public class SerialController implements ISlaveComputer {
                         // Z-offset calibration started: 0 = centre probed, card step next
                         final int err = ZOffsetParams.parseErr(packet.getContent());
                         Logger.i("Leveling: 0x0a 0x37 Z offset calibration, err %d", err);
-                        RequestReceiver receiver = mReceivers.get(packet.getKey());
+                        RequestReceiver receiver = getReceiver(packet.getKey());
                         if (receiver != null) {
                             receiver.receive(err);
                         }
@@ -1354,7 +1401,7 @@ public class SerialController implements ISlaveComputer {
                     case 0x38: {
                         ZOffsetParams.StatusReply reply = ZOffsetParams.parseStatusReply(packet.getContent());
                         Logger.i("Leveling: 0x0a 0x38 Z offset %s", reply);
-                        RequestReceiver receiver = mReceivers.get(packet.getKey());
+                        RequestReceiver receiver = getReceiver(packet.getKey());
                         if (receiver != null) {
                             receiver.receive(reply);
                         }
@@ -1367,7 +1414,7 @@ public class SerialController implements ISlaveComputer {
                         if (err != 0) {
                             Logger.w("Leveling: 0x0a 0x07 save failed, err %d", err);
                         }
-                        RequestReceiver receiver = mReceivers.get(packet.getKey());
+                        RequestReceiver receiver = getReceiver(packet.getKey());
                         if (receiver != null) {
                             receiver.receive(err == 0);
                         }
@@ -1379,7 +1426,7 @@ public class SerialController implements ISlaveComputer {
                             // 2 = bad grid/payload, 11 = bed fault, 205 = probing failed (a250t.3 contract).
                             final int err = packet.getContent()[1] & 0xFF;
                             Logger.w("Leveling: 0x0a 0x%02x failed, err %d", subEventId, err);
-                            RequestReceiver receiver = mReceivers.get(packet.getKey());
+                            RequestReceiver receiver = getReceiver(packet.getKey());
                             if (receiver != null) {
                                 receiver.receive(false);
                             }
@@ -1389,7 +1436,7 @@ public class SerialController implements ISlaveComputer {
                     case 0x06:
                     case 0x08:
                     case 0x09: {
-                        RequestReceiver receiver = mReceivers.get(packet.getKey());
+                        RequestReceiver receiver = getReceiver(packet.getKey());
                         if (receiver != null) {
                             receiver.receive(true);
                         }
@@ -1743,7 +1790,7 @@ public class SerialController implements ISlaveComputer {
     }
 
     private void sendResponse(FabPacket packet, Object result) {
-        RequestReceiver receiver = mReceivers.get(packet.getKey());
+        RequestReceiver receiver = getReceiver(packet.getKey());
         if (receiver != null) {
             if (result != null) {
                 receiver.receive(result);
@@ -1757,9 +1804,7 @@ public class SerialController implements ISlaveComputer {
         // disable heartbeat
         setHeartbeatEnabled(false);
         // complete all the emitters
-        for (int i = 0; i < mReceivers.size(); i++) {
-            int key = mReceivers.keyAt(i);
-            RequestReceiver receiver = mReceivers.get(key);
+        for (RequestReceiver receiver : snapshotReceivers()) {
             receiver.complete();
         }
     }
