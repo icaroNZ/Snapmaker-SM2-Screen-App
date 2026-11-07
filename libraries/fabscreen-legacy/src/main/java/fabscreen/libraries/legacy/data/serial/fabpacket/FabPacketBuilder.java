@@ -2,6 +2,8 @@ package fabscreen.libraries.legacy.data.serial.fabpacket;
 
 import androidx.annotation.NonNull;
 
+import fabscreen.libraries.legacy.data.calibration.LevelingParams;
+
 import okio.Buffer;
 import okio.ByteString;
 
@@ -282,6 +284,17 @@ public class FabPacketBuilder {
     }
 
     /**
+     * Settings: Start Auto Calibration with heat soak (0x09 0x02 grid [bed_temp:u16 soak_s:u16], big-endian).
+     * bedTemp 0 sends the stock 1-byte form. Needs controller SM2-5.2.1-a250t.3 or later for heating.
+     *
+     * @throws IllegalArgumentException grid not 2..11, bedTemp not 0..110 or soakSeconds not 0..3600
+     */
+    public static FabPacket startAutoCalibration(int grid, int bedTemp, int soakSeconds) {
+        byte[] content = LevelingParams.buildLevelingPayload(0x02, grid, bedTemp, soakSeconds);
+        return buildPacket(FabPacket.SETTINGS_REQUEST_EVENT_ID, content);
+    }
+
+    /**
      * Settings: Start Manual Calibration (0x09 0x04)
      */
     public static FabPacket startManualCalibration() {
@@ -290,6 +303,17 @@ public class FabPacketBuilder {
 
     public static FabPacket startManualCalibration(int grid) {
         byte[] content = new byte[]{(byte) 0x04, (byte) grid};
+        return buildPacket(FabPacket.SETTINGS_REQUEST_EVENT_ID, content);
+    }
+
+    /**
+     * Settings: Start Manual Calibration with heat soak (0x09 0x04 grid [bed_temp:u16 soak_s:u16], big-endian).
+     * bedTemp 0 sends the stock 1-byte form.
+     *
+     * @throws IllegalArgumentException grid not 2..11, bedTemp not 0..110 or soakSeconds not 0..3600
+     */
+    public static FabPacket startManualCalibration(int grid, int bedTemp, int soakSeconds) {
+        byte[] content = LevelingParams.buildLevelingPayload(0x04, grid, bedTemp, soakSeconds);
         return buildPacket(FabPacket.SETTINGS_REQUEST_EVENT_ID, content);
     }
 
