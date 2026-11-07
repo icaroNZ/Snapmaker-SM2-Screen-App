@@ -394,7 +394,11 @@ public class UpdateViewModel extends BaseViewModel {
         IFileManager fileManager = BaseApplication.getInstance().getFabLocalFileManager();
         for (IFile file : files) {
             Logger.w("Update: deleting %s (%d KB) with the user's consent", file.getName(), file.length() / 1024);
-            fileManager.removeFile(file);
+            try {
+                fileManager.removeFile(file);
+            } catch (IOException e) {
+                Logger.e("Update: deleting %s failed: %s", file.getName(), e);
+            }
         }
     }
 
