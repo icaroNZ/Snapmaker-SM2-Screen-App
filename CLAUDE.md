@@ -21,10 +21,17 @@ and **UDP discovery on 20054** that Luban, Snapmaker Orca and the Cura plugin us
   (needs controller SM2-5.2.1-a250t.3), soak overlay with Cancel (exit levelling), 11x11 points panel, settings grid 3..11.
   Pure-Java helpers `L/data/calibration/LevelingParams.java` + `HeatSoakTracker.java`. Notes:
   `../_snapmaker2-review/features/bed-levelling-Snapmaker-SM2-Screen-App.md`. CI run 42338515056: green, 56 unit tests.
+- Separate bed mesh / Z-offset calibration (07/11/2026, commits `ac6e66f`..`2532e06`, needs controller
+  SM2-5.2.1-a250t.4): the calibration intro offers "Measure bed mesh" (0x09 0x02 with flags bit 0: a valid stored Z
+  offset is applied and the levelling finishes without the card step) and "Calibrate Z offset" (0x09 0x37 centre probe +
+  card step + 0x09 0x07), and shows the stored offset from the 0x09 0x38 query. Enabled only for the single 3DP head in
+  auto mode when the controller version is a250t.4+ and the query answers (3 s timeouts); otherwise the stock page and
+  bytes. Pure-Java helper `L/data/calibration/ZOffsetParams.java`, tests `ZOffsetPacketTest`. Notes:
+  `../_snapmaker2-review/features/mesh-zoffset-Snapmaker-SM2-Screen-App.md`. CI run 42343602663: green, 94 unit tests.
 - No licence ("TBD"). CI: `.github/workflows/a250t-build.yml` (ours, ubuntu-22.04, JDK 8, NDK 22.1.7171670; runs
   `assembleDebug` + `test`, uploads the debug APKs; CI-only `.github/ci/repos.init.gradle` puts google()/mavenCentral()
   before the Aliyun mirrors). It passed on icaroNZ/Snapmaker-SM2-Screen-App run 42321848947 (07/11/2026): assembleDebug OK, 16/16 unit tests; APK artifact `fabscreen-debug-apks` (debug-signed, do not install on the real screen). Real JVM test classes in `fabscreen/src/test/java/com/snapmaker/fabscreen/`: `FabPacketTest`
-  (frame round-trip, checksum vectors, stream reader), `LevelingPacketTest`, `HeatSoakTrackerTest`; the other test files are Android Studio placeholders.
+  (frame round-trip, checksum vectors, stream reader), `LevelingPacketTest`, `HeatSoakTrackerTest`, `ZOffsetPacketTest`; the other test files are Android Studio placeholders.
 
 ### Tech stack
 Java 8 (603 files), Android compileSdk/targetSdk 28, minSdk 23 (stock screen runs SDK 25), AGP 3.5.3, Gradle wrapper
