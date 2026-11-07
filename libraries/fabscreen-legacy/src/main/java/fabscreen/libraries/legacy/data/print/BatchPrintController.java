@@ -392,6 +392,7 @@ public class BatchPrintController implements IPrintController {
         if (mDeprecatedPrintStateSubject.getValue() != STATE_PRINTING) {
             return;
         }
+        try {
             // A resend loop (the controller asking for the same line again and again) means it rejects
             // what we send; report it, at most once per repeat burst.
             if (lineNo == mLastRequestedLineNo) {
