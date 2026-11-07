@@ -15,11 +15,16 @@ controller calls it **SSTP**; Luban's client class is `SstpHttpChannel`), and se
 and **UDP discovery on 20054** that Luban, Snapmaker Orca and the Cura plugin use. It is **not SACP**.
 
 ### State of this branch
-- `a250t/main` = upstream `main` (one squashed commit `b9c4764`, app `V1.19.3`) + this file. No code changes.
+- `a250t/main` = upstream `main` (one squashed commit `b9c4764`, app `V1.19.3`) + this file + the heat-soaked levelling
+  feature (07/11/2026, commits `a635cc8`..`41e146f`): levelling options dialog (grid 3x3..11x11, bed Off..110 C, soak
+  0..60 min) before auto/manual levelling, extended `0x09 0x02`/`0x09 0x04` payload `<grid> [<bed:u16 BE> <soak_s:u16 BE>]`
+  (needs controller SM2-5.2.1-a250t.3), soak overlay with Cancel (exit levelling), 11x11 points panel, settings grid 3..11.
+  Pure-Java helpers `L/data/calibration/LevelingParams.java` + `HeatSoakTracker.java`. Notes:
+  `../_snapmaker2-review/features/bed-levelling-Snapmaker-SM2-Screen-App.md`. CI run 42338515056: green, 56 unit tests.
 - No licence ("TBD"). CI: `.github/workflows/a250t-build.yml` (ours, ubuntu-22.04, JDK 8, NDK 22.1.7171670; runs
   `assembleDebug` + `test`, uploads the debug APKs; CI-only `.github/ci/repos.init.gradle` puts google()/mavenCentral()
-  before the Aliyun mirrors). It passed on icaroNZ/Snapmaker-SM2-Screen-App run 42321848947 (07/11/2026): assembleDebug OK, 16/16 unit tests; APK artifact `fabscreen-debug-apks` (debug-signed, do not install on the real screen). One real JVM test class, `fabscreen/src/test/java/com/snapmaker/fabscreen/FabPacketTest.java`
-  (frame round-trip, checksum vectors, stream reader); the other test files are Android Studio placeholders.
+  before the Aliyun mirrors). It passed on icaroNZ/Snapmaker-SM2-Screen-App run 42321848947 (07/11/2026): assembleDebug OK, 16/16 unit tests; APK artifact `fabscreen-debug-apks` (debug-signed, do not install on the real screen). Real JVM test classes in `fabscreen/src/test/java/com/snapmaker/fabscreen/`: `FabPacketTest`
+  (frame round-trip, checksum vectors, stream reader), `LevelingPacketTest`, `HeatSoakTrackerTest`; the other test files are Android Studio placeholders.
 
 ### Tech stack
 Java 8 (603 files), Android compileSdk/targetSdk 28, minSdk 23 (stock screen runs SDK 25), AGP 3.5.3, Gradle wrapper
