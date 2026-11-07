@@ -27,6 +27,7 @@ import butterknife.BindView;
 import fabscreen.libraries.legacy.base.BaseFragment;
 import fabscreen.libraries.legacy.base.BaseViewModel;
 import fabscreen.libraries.legacy.data.Constants;
+import com.orhanobut.logger.Logger;
 import fabscreen.libraries.legacy.lib.LogHelper;
 import fabscreen.libraries.legacy.view.FabConfirm;
 import fabscreen.libraries.legacy.view.ViewPagerAdapter;
@@ -290,10 +291,11 @@ public class ControlLaserFragment extends BaseFragment {
     void onClickSwitch(View view) {
         if (mBtnSwitch.isActivated()) {
             mBtnSwitch.setActivated(false);
-            getModel().getSlaveComputer().sendGcode("M5")
+            ToolPowerGuard.offRequest(getModel().getSlaveComputer(), "laser", "switch")
                     .observeOn(AndroidSchedulers.mainThread())
                     .as(bindToLifecycle())
-                    .subscribe();
+                    .subscribe(ok -> { }, LogHelper::log);
+            Logger.i("Control: laser OFF (switch)");
             if (mIsLaserLimitMode) {
                 mIvPower.setImageResource(R.drawable.ic_control_10w_laser_page_power_off);
             }
@@ -329,10 +331,11 @@ public class ControlLaserFragment extends BaseFragment {
                                             dialog.dismiss();
                                             mBtnSwitch.setActivated(true);
                                             mIvPower.setImageResource(R.drawable.ic_control_10w_laser_page_power_on);
+                                            Logger.i("Control: laser ON P%.1f head %d", laserPower, headType);
                                             getModel().getSlaveComputer().sendGcode(String.format(Locale.US, "M3 P%.1f", laserPower))
                                                     .observeOn(AndroidSchedulers.mainThread())
                                                     .as(bindToLifecycle())
-                                                    .subscribe();
+                                                    .subscribe(r -> { }, this::onLaserOnFailed);
                                         })
                                         .show();
                             }
@@ -340,28 +343,57 @@ public class ControlLaserFragment extends BaseFragment {
             } else {
                 mBtnSwitch.setActivated(true);
                 float targetValue = mLaserPowerWidgetPresenter.getTargetValue();
+                Logger.i("Control: laser ON P%.1f head %d", targetValue, getModel().getMachineController().getHeadType());
                 getModel().getSlaveComputer().sendGcode(String.format(Locale.US, "M3 P%.1f", targetValue))
                         .observeOn(AndroidSchedulers.mainThread())
                         .as(bindToLifecycle())
-                        .subscribe();
+                        .subscribe(r -> { }, this::onLaserOnFailed);
             }
         }
     }
 
-    private void shutDownLaser() {
-        getModel().getSlaveComputer().sendGcode("M5")
-                .observeOn(AndroidSchedulers.mainThread())
-                .as(bindToLifecycle())
-                .subscribe();
-        mBtnSwitch.setActivated(false);
-        if (mIsLaserLimitMode) {
+    /** SCR-12: M3 failed (link down): show the switch as off again instead of crashing. */
+    private void onLaserOnFailed(Throwable e) {
+        Logger.w("Control: laser M3 failed: %s", e);
+        if (mBtnSwitch != null) {
+            mBtnSwitch.setActivated(false);
+        }
+        if (mIsLaserLimitMode && mIvPower != null) {
             mIvPower.setImageResource(R.drawable.ic_control_10w_laser_page_power_off);
         }
     }
 
+    private void shutDownLaser() {
+        shutDownLaser("tab");
+    }
+
+    private void shutDownLaser(String reason) {
+        // Not bound to the lifecycle: this also runs while the page is going away.
+        ToolPowerGuard.switchOff(getModel().getSlaveComputer(), "laser", reason);
+        if (mBtnSwitch != null) {
+            mBtnSwitch.setActivated(false);
+        }
+        if (mIsLaserLimitMode && mIvPower != null) {
+            mIvPower.setImageResource(R.drawable.ic_control_10w_laser_page_power_off);
+        }
+    }
+
+    /**
+     * SCR-06: the page can be left without Back (a saved remote token reconnects and the app jumps
+     * to the Remote page, a firmware/emergency page opens, ...). The controller never switches an
+     * idle laser off by itself, so switch it off whenever the page stops being in the foreground.
+     */
+    @Override
+    public void onPause() {
+        if (mBtnSwitch != null && mBtnSwitch.isActivated()) {
+            shutDownLaser("page paused/left without Back");
+        }
+        super.onPause();
+    }
+
     @Override
     protected void back() {
-        shutDownLaser();
+        shutDownLaser("back");
         super.back();
     }
 }

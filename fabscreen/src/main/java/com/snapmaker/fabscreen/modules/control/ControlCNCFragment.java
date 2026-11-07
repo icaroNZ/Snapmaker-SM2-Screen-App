@@ -22,6 +22,7 @@ import com.snapmaker.fabscreen.modules.common.SetOriginWidgetPresenter;
 import com.snapmaker.fabscreen.modules.common.SpindleWidgetPresenter;
 
 import fabscreen.libraries.legacy.data.Constants;
+import com.orhanobut.logger.Logger;
 import fabscreen.libraries.legacy.lib.LogHelper;
 import fabscreen.libraries.legacy.view.ViewPagerAdapter;
 import fabscreen.libraries.legacy.view.ViewUtils;
@@ -251,12 +252,11 @@ public class ControlCNCFragment extends BaseFragment {
     void onClickSwitch() {
         if (mBtnSwitch.isActivated()) {
             mBtnSwitch.setActivated(false);
-            getModel().getSlaveComputer().sendGcode("M5")
+            ToolPowerGuard.offRequest(getModel().getSlaveComputer(), "spindle", "switch")
                     .observeOn(AndroidSchedulers.mainThread())
                     .as(bindToLifecycle())
-                    .subscribe(response -> {
-                        /**/
-                    }, LogHelper::log);
+                    .subscribe(ok -> { }, LogHelper::log);
+            Logger.i("Control: spindle OFF (switch)");
         } else {
             mBtnSwitch.setActivated(true);
             float targetValue = mSpindleWidgetPresenter.getTargetValue();
@@ -266,20 +266,40 @@ public class ControlCNCFragment extends BaseFragment {
             } else if (getModel().getMachineController().getHeadType() == Constants.HEAD_CNC_200W) {
                 gcodeCommand = String.format(Locale.US, "M3 S%.1f", targetValue);
             }
+            Logger.i("Control: spindle ON (%s) head %d", gcodeCommand, getModel().getMachineController().getHeadType());
             getModel().getSlaveComputer().sendGcode(gcodeCommand)
                     .observeOn(AndroidSchedulers.mainThread())
                     .as(bindToLifecycle())
                     .subscribe(response -> {
                         /**/
-                    }, LogHelper::log);
+                    }, e -> {
+                        // SCR-12: link down: show the switch as off again.
+                        Logger.w("Control: spindle M3 failed: %s", e);
+                        mBtnSwitch.setActivated(false);
+                    });
         }
+    }
+
+    /**
+     * SCR-06: switch the spindle off when the page is left without Back (e.g. the app jumps to
+     * the Remote page when a saved token reconnects); the controller has no idle auto-off.
+     */
+    @Override
+    public void onPause() {
+        if (mBtnSwitch != null && mBtnSwitch.isActivated()) {
+            ToolPowerGuard.switchOff(getModel().getSlaveComputer(), "spindle", "page paused/left without Back");
+            mBtnSwitch.setActivated(false);
+        }
+        super.onPause();
     }
 
     @Override
     protected void back() {
-        getModel().getSlaveComputer().sendGcode("M5")
+        // SCR-12: Back used to hang for ever when M5 got no reply (no timeout, no error path).
+        Logger.i("Control: spindle OFF (back)");
+        ToolPowerGuard.offRequest(getModel().getSlaveComputer(), "spindle", "back")
                 .observeOn(AndroidSchedulers.mainThread())
                 .as(bindToLifecycle())
-                .subscribe(success -> super.back());
+                .subscribe(ok -> super.back(), e -> super.back());
     }
 }

@@ -1,5 +1,7 @@
 package fabscreen.libraries.legacy.lib;
 
+import java.util.concurrent.TimeUnit;
+import com.orhanobut.logger.Logger;
 import java.util.ArrayList;
 
 import fabscreen.libraries.legacy.data.Model;
@@ -145,9 +147,14 @@ public class LaserFineTuneExecutor {
     private void nextLine(int index) {
         Disposable sub = moveToNextStartPosition(mStartPositions.get(index))
                 .flatMap(success -> engraveLine(mEndPositions.get(index)))
+                // SCR-06: the M3 -> move -> M5 chain had no M5 when it failed or was cancelled
+                // (page left mid-line), leaving the beam on.
+                .doOnDispose(() -> laserOffBestEffort("line " + index + " cancelled"))
                 .subscribe(success -> {
                     mEngraveIndexSubject.onNext(mEngraveIndexSubject.getValue() + 1);
                 }, e -> {
+                    Logger.e("Laser fine-tune: line %d failed: %s", index, e);
+                    laserOffBestEffort("line " + index + " failed");
                     LogHelper.log(e);
                     mEngraveIndexSubject.onNext(-1);
                 });
@@ -167,6 +174,14 @@ public class LaserFineTuneExecutor {
 
     private Observable<FabPacketContent.GcodeResponse> turnOnLaser() {
         return mModel.getSlaveComputer().sendGcode("M3 P70");
+    }
+
+    /** Fire-and-forget M5 with a timeout; not added to mDisposables (they may be clearing now). */
+    private void laserOffBestEffort(String reason) {
+        Logger.w("Laser fine-tune: M5 (%s)", reason);
+        mModel.getSlaveComputer().sendGcode("M5")
+                .timeout(2, TimeUnit.SECONDS)
+                .subscribe(r -> { }, e -> Logger.w("Laser fine-tune: M5 failed: %s", e));
     }
 
     private Observable<FabPacketContent.GcodeResponse> turnOffLaser() {
