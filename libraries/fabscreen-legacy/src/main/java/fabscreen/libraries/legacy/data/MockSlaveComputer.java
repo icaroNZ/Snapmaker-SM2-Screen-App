@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Random;
 import java.util.concurrent.TimeUnit;
 
+import fabscreen.libraries.legacy.data.calibration.ZOffsetParams;
 import fabscreen.libraries.legacy.data.serial.fabpacket.FabPacket;
 import fabscreen.libraries.legacy.data.serial.fabpacket.FabPacketContent;
 import fabscreen.libraries.legacy.data.serial.fabpacket.content.ExtruderModel;
@@ -248,6 +249,40 @@ public class MockSlaveComputer implements ISlaveComputer {
         return mAutoCalibration;
     }
 
+    // Simulated a250t.4 Z offset: not set until a Z-offset calibration (or a card step) is saved.
+    private int mMockZOffsetStatus = ZOffsetParams.STATUS_NOT_SET;
+    private int mMockZOffsetUm = 0;
+    private boolean mMockZOffsetPending = false;
+    private boolean mMockCardStepPending = false;
+
+    @Override
+    public Observable<ZOffsetParams.StatusReply> startAutoCalibration(int grid, int bedTemp, int soakSeconds,
+                                                                     boolean useStoredZOffset) {
+        // The progress emitter completes the request (no heating simulated).
+        return mAutoCalibration.take(1).map(ok -> {
+            final boolean applied = useStoredZOffset && mMockZOffsetStatus == ZOffsetParams.STATUS_VALID;
+            mMockCardStepPending = ok && !applied;
+            return new ZOffsetParams.StatusReply(ok ? 0 : 205, mMockZOffsetStatus, mMockZOffsetUm, useStoredZOffset);
+        });
+    }
+
+    @Override
+    public Observable<Integer> startZOffsetCalibration(int bedTemp, int soakSeconds) {
+        mMockZOffsetPending = true;
+        return Observable.just(0).delay(2, TimeUnit.SECONDS);
+    }
+
+    @Override
+    public Observable<ZOffsetParams.StatusReply> queryZOffset(int timeoutMillis) {
+        return Observable.just(new ZOffsetParams.StatusReply(0, mMockZOffsetStatus, mMockZOffsetUm, true));
+    }
+
+    @Override
+    public boolean isZOffsetCalibrationSupported(String controllerVersion) {
+        // the mock behaves like controller SM2-5.2.1-a250t.4
+        return true;
+    }
+
     @Override
     public Observable<Integer> getAutoCalibrationProgress() {
         PublishSubject<Integer> subject = PublishSubject.create();
@@ -293,11 +328,19 @@ public class MockSlaveComputer implements ISlaveComputer {
 
     @Override
     public Observable<Boolean> saveCalibration() {
+        if (mMockZOffsetPending || mMockCardStepPending) {
+            mMockZOffsetStatus = ZOffsetParams.STATUS_VALID;
+            mMockZOffsetUm = 1234;
+        }
+        mMockZOffsetPending = false;
+        mMockCardStepPending = false;
         return Observable.just(true);
     }
 
     @Override
     public Observable<Boolean> exitCalibration() {
+        mMockZOffsetPending = false;
+        mMockCardStepPending = false;
         return Observable.just(true);
     }
 

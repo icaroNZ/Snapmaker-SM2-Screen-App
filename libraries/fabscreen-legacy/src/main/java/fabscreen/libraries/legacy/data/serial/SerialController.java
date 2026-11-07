@@ -22,6 +22,7 @@ import java.util.concurrent.TimeUnit;
 
 import fabscreen.libraries.legacy.data.Constants;
 import fabscreen.libraries.legacy.data.ISlaveComputer;
+import fabscreen.libraries.legacy.data.calibration.ZOffsetParams;
 import fabscreen.libraries.legacy.data.serial.fabpacket.FabPacket;
 import fabscreen.libraries.legacy.data.serial.fabpacket.FabPacketBuilder;
 import fabscreen.libraries.legacy.data.serial.fabpacket.FabPacketContent;
@@ -456,13 +457,32 @@ public class SerialController implements ISlaveComputer {
     @Override
     public Observable<Boolean> startAutoCalibration() {
         FabPacket packet = FabPacketBuilder.startAutoCalibration();
-        return request(packet).map(o -> (Boolean) o);
+        return request(packet).map(SerialController::isAutoLevelReplyOk);
     }
 
     @Override
     public Observable<Boolean> startAutoCalibration(int grid) {
         FabPacket packet = FabPacketBuilder.startAutoCalibration(grid);
-        return request(packet).map(o -> (Boolean) o);
+        return request(packet).map(SerialController::isAutoLevelReplyOk);
+    }
+
+    /**
+     * The 0x0a 0x02 dispatcher emits a {@link ZOffsetParams.StatusReply} for every auto levelling reply
+     * (short or extended); the stock overloads only need "err == 0".
+     */
+    private static boolean isAutoLevelReplyOk(Object o) {
+        if (o instanceof ZOffsetParams.StatusReply) {
+            return ((ZOffsetParams.StatusReply) o).isOk();
+        }
+        return (Boolean) o;
+    }
+
+    private static ZOffsetParams.StatusReply toStatusReply(Object o) {
+        if (o instanceof ZOffsetParams.StatusReply) {
+            return (ZOffsetParams.StatusReply) o;
+        }
+        // not expected (the dispatcher always parses), keep the stock meaning
+        return new ZOffsetParams.StatusReply((Boolean) o ? 0 : 1, ZOffsetParams.STATUS_NOT_SET, 0, false);
     }
 
     /**
@@ -474,7 +494,46 @@ public class SerialController implements ISlaveComputer {
         FabPacket packet = FabPacketBuilder.startAutoCalibration(grid, bedTemp, soakSeconds);
         Logger.i("Leveling: request auto, grid %d, bed %d C, soak %d s, content %s",
                 grid, bedTemp, soakSeconds, toHex(packet.getContent()));
-        return request(packet).map(o -> (Boolean) o);
+        return request(packet).map(SerialController::isAutoLevelReplyOk);
+    }
+
+    /**
+     * Settings: Start Auto Calibration with the Z-offset flags byte (0x09 0x02 grid bed_temp soak_s flags).
+     * No timeout: the controller answers after heat-up + soak + probing.
+     */
+    @Override
+    public Observable<ZOffsetParams.StatusReply> startAutoCalibration(int grid, int bedTemp, int soakSeconds,
+                                                                     boolean useStoredZOffset) {
+        FabPacket packet = FabPacketBuilder.startAutoCalibration(grid, bedTemp, soakSeconds, useStoredZOffset);
+        Logger.i("Leveling: request auto, grid %d, bed %d C, soak %d s, use stored Z offset %b, content %s",
+                grid, bedTemp, soakSeconds, useStoredZOffset, toHex(packet.getContent()));
+        return request(packet).map(SerialController::toStatusReply);
+    }
+
+    /**
+     * Settings: Calibrate Z offset (0x09 0x37 [bed_temp soak_s]). No timeout: heat-up + soak + homing + probe.
+     */
+    @Override
+    public Observable<Integer> startZOffsetCalibration(int bedTemp, int soakSeconds) {
+        FabPacket packet = FabPacketBuilder.startZOffsetCalibration(bedTemp, soakSeconds);
+        Logger.i("Leveling: request Z offset calibration, bed %d C, soak %d s, content %s",
+                bedTemp, soakSeconds, toHex(packet.getContent()));
+        return request(packet).map(o -> (Integer) o);
+    }
+
+    /**
+     * Settings: Query Z offset (0x09 0x38). Older firmware does not answer in a way that matches the
+     * request, so the timeout is the "not supported" signal.
+     */
+    @Override
+    public Observable<ZOffsetParams.StatusReply> queryZOffset(int timeoutMillis) {
+        FabPacket packet = FabPacketBuilder.queryZOffset();
+        return request(packet, timeoutMillis).map(SerialController::toStatusReply);
+    }
+
+    @Override
+    public boolean isZOffsetCalibrationSupported(String controllerVersion) {
+        return ZOffsetParams.isSupportedControllerVersion(controllerVersion);
     }
 
     @Override
@@ -1260,7 +1319,53 @@ public class SerialController implements ISlaveComputer {
                         sendResponse(packet, packet.getContent()[1] == 0);
                         break;
                     }
-                    case 0x02:
+                    case 0x02: {
+                        // Auto levelling: 1-byte <err> (stock / a250t.3, or flags bit 0 clear) or the a250t.4
+                        // 6-byte <err> <status> <offset_um:i32> when the request asked for the stored Z offset.
+                        ZOffsetParams.StatusReply reply = ZOffsetParams.parseStatusReply(packet.getContent());
+                        if (reply.isOk()) {
+                            Logger.i("Leveling: 0x0a 0x02 %s", reply);
+                        } else {
+                            Logger.w("Leveling: 0x0a 0x02 failed, %s", reply);
+                        }
+                        RequestReceiver receiver = mReceivers.get(packet.getKey());
+                        if (receiver != null) {
+                            receiver.receive(reply);
+                        }
+                        break;
+                    }
+                    case 0x37: {
+                        // Z-offset calibration started: 0 = centre probed, card step next
+                        final int err = ZOffsetParams.parseErr(packet.getContent());
+                        Logger.i("Leveling: 0x0a 0x37 Z offset calibration, err %d", err);
+                        RequestReceiver receiver = mReceivers.get(packet.getKey());
+                        if (receiver != null) {
+                            receiver.receive(err);
+                        }
+                        break;
+                    }
+                    case 0x38: {
+                        ZOffsetParams.StatusReply reply = ZOffsetParams.parseStatusReply(packet.getContent());
+                        Logger.i("Leveling: 0x0a 0x38 Z offset %s", reply);
+                        RequestReceiver receiver = mReceivers.get(packet.getKey());
+                        if (receiver != null) {
+                            receiver.receive(reply);
+                        }
+                        break;
+                    }
+                    case 0x07: {
+                        // Save: err 1 when nothing was stored (e.g. Z offset out of range, nozzle moved off the
+                        // centre). Stock callers ignore the value.
+                        final int err = ZOffsetParams.parseErr(packet.getContent());
+                        if (err != 0) {
+                            Logger.w("Leveling: 0x0a 0x07 save failed, err %d", err);
+                        }
+                        RequestReceiver receiver = mReceivers.get(packet.getKey());
+                        if (receiver != null) {
+                            receiver.receive(err == 0);
+                        }
+                        break;
+                    }
                     case 0x04:
                         if (packet.getContent().length > 1 && packet.getContent()[1] != 0) {
                             // Auto/manual levelling start failed. err: 1 = heat soak aborted or no 3DP head,
@@ -1275,7 +1380,6 @@ public class SerialController implements ISlaveComputer {
                         }
                     case 0x05:
                     case 0x06:
-                    case 0x07:
                     case 0x08:
                     case 0x09: {
                         RequestReceiver receiver = mReceivers.get(packet.getKey());

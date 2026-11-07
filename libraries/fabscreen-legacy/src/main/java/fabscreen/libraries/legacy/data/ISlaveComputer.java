@@ -4,6 +4,7 @@ package fabscreen.libraries.legacy.data;
 import java.util.List;
 
 import fabscreen.libraries.legacy.data.serial.fabpacket.FabPacket;
+import fabscreen.libraries.legacy.data.calibration.ZOffsetParams;
 import fabscreen.libraries.legacy.data.serial.fabpacket.FabPacketContent;
 import fabscreen.libraries.legacy.data.serial.fabpacket.content.ExtruderModel;
 import fabscreen.libraries.legacy.data.serial.fabpacket.content.ExtruderTemperature;
@@ -118,6 +119,31 @@ public interface ISlaveComputer {
      */
     Observable<Boolean> startAutoCalibration(int grid, int bedTemp, int soakSeconds);
 
+    /**
+     * Auto levelling with the Z-offset flags byte (0x09 0x02 grid bed_temp soak_s flags, controller
+     * SM2-5.2.1-a250t.4+). With useStoredZOffset the controller applies a valid stored Z offset and finishes
+     * without the card step ({@link ZOffsetParams.StatusReply#isOffsetApplied()}); otherwise, or with a short
+     * reply from older firmware, the card step follows as before. No timeout (heat-up + soak + probing).
+     */
+    Observable<ZOffsetParams.StatusReply> startAutoCalibration(int grid, int bedTemp, int soakSeconds, boolean useStoredZOffset);
+
+    /**
+     * Z-offset calibration (0x09 0x37 [bed_temp soak_s], controller SM2-5.2.1-a250t.4+): heat/soak, home, probe
+     * the bed centre and park the nozzle over it. Emits the controller error (0 = card step next). No timeout.
+     */
+    Observable<Integer> startZOffsetCalibration(int bedTemp, int soakSeconds);
+
+    /**
+     * Query the stored Z offset (0x09 0x38, controller SM2-5.2.1-a250t.4+). Errors with a timeout when the
+     * controller does not answer (older firmware).
+     */
+    Observable<ZOffsetParams.StatusReply> queryZOffset(int timeoutMillis);
+
+    /**
+     * True if this controller version may be asked about the Z offset (0x09 0x37 / 0x38).
+     */
+    boolean isZOffsetCalibrationSupported(String controllerVersion);
+
     Observable<Integer> getAutoCalibrationProgress();
 
     Observable<Boolean> startManualCalibration();
@@ -135,7 +161,8 @@ public interface ISlaveComputer {
     Observable<Boolean> moveCalibrationPoint(double offset);
 
     /**
-     * Settings: Save Calibration. (0x09 0x07)
+     * Settings: Save Calibration. (0x09 0x07). False when the controller answers an error (e.g. a Z offset
+     * that was not stored); older callers ignore the value.
      */
     Observable<Boolean> saveCalibration();
 
