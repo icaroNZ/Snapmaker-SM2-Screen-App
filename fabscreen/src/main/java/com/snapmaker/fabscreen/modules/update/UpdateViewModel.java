@@ -15,6 +15,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 
@@ -26,6 +27,7 @@ import fabscreen.libraries.legacy.lib.file.IFile;
 import fabscreen.libraries.legacy.lib.file.IFileManager;
 import fabscreen.libraries.legacy.lib.update.FabUpdatePackage;
 import fabscreen.libraries.legacy.lib.update.FabUpdater;
+import fabscreen.libraries.legacy.lib.update.UpdateSpace;
 import io.reactivex.Observable;
 import io.reactivex.Single;
 import io.reactivex.android.schedulers.AndroidSchedulers;
@@ -52,6 +54,9 @@ public class UpdateViewModel extends BaseViewModel {
     private int mPackageIndex = -1;
 
     private IFile mFirmwareFile;
+
+    private static final long MB = 1024 * 1024;
+    private static final int CONTROLLER_VERSION_TIMEOUT_S = 3;
 
     private PublishSubject<Boolean> mUpdateCompleteSubject = PublishSubject.create();
     private BehaviorSubject<String> mMessageSubject = BehaviorSubject.createDefault("");
@@ -89,13 +94,29 @@ public class UpdateViewModel extends BaseViewModel {
     }
 
     Observable<Boolean> update() {
+        Logger.i("Update: start, %d package(s)", mUpdater == null ? -1 : mUpdater.getPacketCount());
         getModel().getSlaveComputer().setHeartbeatEnabled(false);
 
+        // SCR-16: the heartbeat (status polling) never came back after a failed update.
+        Disposable done = mUpdateCompleteSubject.filter(success -> !success).take(1)
+                .subscribe(failed -> {
+                    getModel().getSlaveComputer().setHeartbeatEnabled(true);
+                    Logger.i("Heartbeat re-enabled after update (success=false)");
+                }, LogHelper::log);
+        disposables.add(done);
+
+        // SCR-16: the version request had no timeout and no error path, so a lost reply stalled the update.
         Disposable sub = getModel().getSlaveComputer().getControllerVersion()
+                .timeout(CONTROLLER_VERSION_TIMEOUT_S, TimeUnit.SECONDS)
+                .observeOn(AndroidSchedulers.mainThread())
                 .subscribe(version -> {
                     mControllerVersion = version;
+                    Logger.i("Update: controller reports version '%s'", version);
 
                     updatePackage(0);
+                }, e -> {
+                    Logger.e("Update: controller version request failed: %s", e);
+                    mUpdateCompleteSubject.onNext(false);
                 });
         disposables.add(sub);
 
@@ -105,7 +126,10 @@ public class UpdateViewModel extends BaseViewModel {
     private void initEvents() {
         Disposable sub = getModel().getSlaveComputer().watchPacketIndexRequest()
                 .observeOn(AndroidSchedulers.mainThread())
-                .subscribe(this::sendPackagePart);
+                .subscribe(this::sendPackagePart, e -> {
+                    Logger.e("Update: package index watch failed: %s", e);
+                    LogHelper.log(e);
+                });
         disposables.add(sub);
     }
 
@@ -132,10 +156,14 @@ public class UpdateViewModel extends BaseViewModel {
             }
 
             // Update Controller if update version is not equals with current version.
+            Logger.i("Update: package %d/%d type %d, bundle controller version '%s', controller '%s', force %b",
+                    pid + 1, mUpdater.getPacketCount(), p[0], mUpdater.getControllerVersion(), mControllerVersion,
+                    mUpdater.isForceUpdate());
             if (p[0] == FabUpdatePackage.UpdatePackageHeader.TYPE_CONTROLLER_FIRMWARE
                     && mUpdater.getControllerVersion().equals(mControllerVersion)
                     && !mUpdater.isForceUpdate()) {
                 // skip the package
+                Logger.i("Update: controller already at the bundle version, skipping package %d", pid + 1);
                 updatePackage(pid + 1);
             } else {
                 // Start sending update packet to Controller.
@@ -192,7 +220,14 @@ public class UpdateViewModel extends BaseViewModel {
     }
 
     private void sendPackagePart(int index) {
+        if (index < 0 || index > mUpdater.getPartCount()) {
+            // SCR-16: an out-of-range request (e.g. a reply meant for another sub-command) used to
+            // index past the parts array.
+            Logger.e("Update: controller asked for part %d of %d, ignored", index, mUpdater.getPartCount());
+            return;
+        }
         if (index == mUpdater.getPartCount()) {
+            Logger.i("Update: all %d parts sent", index);
             getModel().getSlaveComputer().sendUpdatePackage((byte) 0x02, (short) index, null);
             mProgressSubject.onNext(1f);
             checkPackageUpdated();
@@ -282,52 +317,85 @@ public class UpdateViewModel extends BaseViewModel {
         }
     }
 
-    public Single<Boolean> checkAvailableSpaceForUpdate(IFile targetFile) {
-        SingleSubject<Boolean> resultSubject = SingleSubject.create();
+    /** Result of {@link #planSpaceForUpdate}: what is needed and which files would be removed. */
+    public static final class SpacePlan {
+        public final long requiredBytes;
+        public final long availableBytes;
+        public final List<IFile> filesToDelete;
+        public final long bytesFreed;
+        /** True when deleting every deletable file would still not be enough. */
+        public final boolean impossible;
+
+        SpacePlan(long requiredBytes, long availableBytes, List<IFile> filesToDelete, long bytesFreed, boolean impossible) {
+            this.requiredBytes = requiredBytes;
+            this.availableBytes = availableBytes;
+            this.filesToDelete = filesToDelete;
+            this.bytesFreed = bytesFreed;
+            this.impossible = impossible;
+        }
+
+        public boolean isEnough() {
+            return availableBytes >= requiredBytes;
+        }
+    }
+
+    /**
+     * SCR-11: work out whether the update fits and which oldest local files would have to go. It
+     * never deletes anything: the caller asks the user first ({@link #deleteFiles}).
+     */
+    public Single<SpacePlan> planSpaceForUpdate(IFile targetFile) {
+        SingleSubject<SpacePlan> resultSubject = SingleSubject.create();
         IFileManager fileManager = BaseApplication.getInstance().getFabLocalFileManager();
         fileManager.mount();
         long availableSpace = fileManager.getTotalSpace() - fileManager.getUsedSpace();
-        long requireSpace = calculateRequireSpaceFromFile(targetFile);
+        long requireSpace = UpdateSpace.requiredBytes(targetFile.length(), targetFile.isLocal());
+        long shortfall = UpdateSpace.shortfall(requireSpace, availableSpace);
+        Logger.w("Update needs %d MB, free %d MB (bundle %d MB, local %b)", requireSpace / MB, availableSpace / MB,
+                targetFile.length() / MB, targetFile.isLocal());
 
-        if (requireSpace > availableSpace) {
-            Logger.w("not enough available space for file!");
-            fileManager.listFiles()
-                    .observeOn(AndroidSchedulers.mainThread())
-                    .as(bindToLifecycle())
-                    .subscribe(files -> {
-                        files.sort(Comparator.comparingLong(IFile::lastModified));
-                        long count = 0;
-                        ArrayList<IFile> deleteFiles = new ArrayList<>();
-                        for (int i = 0 ; i < files.size() ; i++) {
-                            IFile tempFile = files.get(i);
-                            if (count < requireSpace - availableSpace) {
-                                if (!tempFile.getName().startsWith(".")) {
-                                    count += tempFile.length();
-                                    deleteFiles.add(tempFile);
-                                }
-                            }
-                        }
-                        for (IFile file2 : deleteFiles) {
-                            Logger.d("Start deleting file " + file2.getName());
-                            fileManager.removeFile(file2);
-                        }
-                        resultSubject.onSuccess(true);
-                    });
-        } else {
-            resultSubject.onSuccess(true);
+        if (shortfall == 0) {
+            resultSubject.onSuccess(new SpacePlan(requireSpace, availableSpace, new ArrayList<>(), 0, false));
+            return resultSubject.hide();
         }
+
+        fileManager.listFiles()
+                .observeOn(AndroidSchedulers.mainThread())
+                .as(bindToLifecycle())
+                .subscribe(files -> {
+                    ArrayList<IFile> candidates = new ArrayList<>();
+                    for (IFile f : files) {
+                        if (UpdateSpace.isDeletable(f.getName(), f.isDirectory())) {
+                            candidates.add(f);
+                        }
+                    }
+                    candidates.sort(Comparator.comparingLong(IFile::lastModified));
+                    List<Long> sizes = new ArrayList<>();
+                    for (IFile f : candidates) {
+                        sizes.add(f.length());
+                    }
+                    int count = UpdateSpace.countOldestToFree(sizes, shortfall);
+                    List<IFile> toDelete = new ArrayList<>(candidates.subList(0, count < 0 ? candidates.size() : count));
+                    long freed = 0;
+                    for (IFile f : toDelete) {
+                        freed += f.length();
+                    }
+                    Logger.w("Update: short of %d MB; %d oldest file(s) (%d MB) would have to be deleted%s",
+                            shortfall / MB, toDelete.size(), freed / MB, count < 0 ? ", still not enough" : "");
+                    resultSubject.onSuccess(new SpacePlan(requireSpace, availableSpace, toDelete, freed, count < 0));
+                }, e -> {
+                    LogHelper.log(e);
+                    resultSubject.onSuccess(new SpacePlan(requireSpace, availableSpace, new ArrayList<>(), 0, true));
+                });
         return resultSubject.hide();
     }
 
-    private long calculateRequireSpaceFromFile(IFile targetFile) {
-        long requireSpace = 0;
-        if (targetFile.isLocal()) {
-            requireSpace += Math.max(targetFile.length() * 2, 300 * 1024 * 1024);;
-        } else {
-            // Cache file into local and Android 7.1 needs double file length space for updating app.
-            requireSpace += Math.max(targetFile.length() * 3, 300 * 1024 * 1024);
+    /** Delete files the user agreed to remove (SCR-11). */
+    public void deleteFiles(List<IFile> files) {
+        IFileManager fileManager = BaseApplication.getInstance().getFabLocalFileManager();
+        for (IFile file : files) {
+            Logger.w("Update: deleting %s (%d KB) with the user's consent", file.getName(), file.length() / 1024);
+            fileManager.removeFile(file);
         }
-        return requireSpace;
     }
 
     Observable<String> getUpdateMessageObservable() {

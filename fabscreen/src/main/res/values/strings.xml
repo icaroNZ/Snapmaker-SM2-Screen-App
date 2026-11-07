@@ -181,6 +181,7 @@
     <string name="dialog_add_file_into_workspace_low_system_storage_desc">The current system storage space is running low. It is recommended to tidy up local files as soon as possible to free up some storage space, as it may affect the system operation.</string>
     <string name="dialog_add_file_into_workspace_insufficient_system_storage_title">Insufficient System Storage</string>
     <string name="dialog_add_file_into_workspace_insufficient_system_storage_desc">The current system storage space is insufficient to print this file. You need to remove some local files to free up enough storage.</string>
+    <string name="settings_update_free_space_confirm">Not enough storage for this update: %1$d MB needed, %2$d MB free. Delete the %3$d oldest local file(s) (%4$d MB) and continue? Cancel keeps your files and stops the update.</string>
 
 
     <!-- Home -->

@@ -149,15 +149,45 @@ public class UpdateFragment extends BaseFragment {
     }
 
     private void checkAvailableSpaceForUpdate(IFile file) {
-        mViewModel.checkAvailableSpaceForUpdate(file)
+        mViewModel.planSpaceForUpdate(file)
                 .observeOn(AndroidSchedulers.mainThread())
                 .as(bindToLifecycle())
-                .subscribe(available -> {
-                    // Cache bin file and start update.
-                    String updateCacheFolder = getModel().getCacheDir().getAbsolutePath() + File.separatorChar + "update";
-                    mViewModel.saveUpdateFile(updateCacheFolder, file);
-                    update(file);
+                .subscribe(plan -> {
+                    if (plan.isEnough()) {
+                        cacheAndUpdate(file);
+                        return;
+                    }
+                    // SCR-11: the oldest G-code/laser/CNC files used to be deleted without asking.
+                    long mb = 1024 * 1024;
+                    String desc = getString(R.string.settings_update_free_space_confirm,
+                            plan.requiredBytes / mb, plan.availableBytes / mb,
+                            plan.filesToDelete.size(), plan.bytesFreed / mb);
+                    FabConfirm.create(getContext())
+                            .setCanceledOnTouchOutSide(false)
+                            .setIcon(R.drawable.pic_dialog_warning_72x72)
+                            .setDescription(desc)
+                            .setCancel(R.string.all_cancel, (dialog, which) -> {
+                                dialog.dismiss();
+                                Logger.w("Update: cancelled by the user (not enough space, files kept)");
+                                back();
+                            })
+                            .setConfirm(R.string.all_confirm, (dialog, which) -> {
+                                dialog.dismiss();
+                                mViewModel.deleteFiles(plan.filesToDelete);
+                                cacheAndUpdate(file);
+                            })
+                            .show();
+                }, e -> {
+                    LogHelper.log(e);
+                    back();
                 });
+    }
+
+    private void cacheAndUpdate(IFile file) {
+        // Cache bin file and start update.
+        String updateCacheFolder = getModel().getCacheDir().getAbsolutePath() + File.separatorChar + "update";
+        mViewModel.saveUpdateFile(updateCacheFolder, file);
+        update(file);
     }
 
     private void update(IFile file) {
