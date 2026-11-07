@@ -15,6 +15,7 @@
  */
 package fabscreen.libraries.legacy.lib.fabserver;
 
+import com.orhanobut.logger.Logger;
 import androidx.annotation.NonNull;
 
 import com.yanzhenjie.andserver.AndServer;
@@ -98,7 +99,13 @@ public class FabServer {
                         .setListenerPort(mPort)
                         .setServerInfo("AndServer/2.0.0")
                         .registerHandler("*", handler)
-                        .setExceptionLogger(ExceptionLogger.NO_OP)
+                        // SCR-20: HTTP-level errors were discarded (NO_OP). Log them, except the
+                        // routine socket timeouts / resets of idle keep-alive connections.
+                        .setExceptionLogger(ex -> {
+                            if (!HttpErrorFilter.isRoutine(ex)) {
+                                Logger.w("HTTP: server error: %s", ex);
+                            }
+                        })
                         .create();
                 try {
                     isRunning = true;

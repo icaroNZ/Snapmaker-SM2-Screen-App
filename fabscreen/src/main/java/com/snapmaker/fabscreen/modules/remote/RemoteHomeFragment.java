@@ -1,5 +1,6 @@
 package com.snapmaker.fabscreen.modules.remote;
 
+import fabscreen.libraries.legacy.server.http.HttpGate;
 import android.content.Intent;
 import android.os.Bundle;
 import android.view.LayoutInflater;
@@ -575,12 +576,24 @@ public class RemoteHomeFragment extends BaseFragment {
                         .setMessage(R.string.remote_connect_request_desc);
                 dialog.setPositive(R.string.all_yes, (v, which) -> {
                     v.dismiss();
+                    // SCR-20: grant only the session this dialog was shown for; another client may
+                    // have become current while the dialog was open.
+                    if (getModel().getRemoteController().getCurrentSession() != session) {
+                        Logger.w("Remote access approval ignored: session %s is no longer current",
+                                HttpGate.tokenPrefix(session.getToken()));
+                        return;
+                    }
                     getModel().getRemoteController().grantCurrentSession();
-                    Logger.i("Remote access request approved, session #%s", session.getToken());
+                    Logger.i("Remote access request approved, session #%s", HttpGate.tokenPrefix(session.getToken()));
                 });
                 dialog.setNegative(R.string.all_no, (v, which) -> {
                     v.dismiss();
-                    Logger.i("Remote access request denied. %s", session.getToken());
+                    if (getModel().getRemoteController().getCurrentSession() != session) {
+                        Logger.w("Remote access denial ignored: session %s is no longer current",
+                                HttpGate.tokenPrefix(session.getToken()));
+                        return;
+                    }
+                    Logger.i("Remote access request denied. %s", HttpGate.tokenPrefix(session.getToken()));
                     getModel().getRemoteController().denyCurrentSession();
                 });
                 dialog.show();

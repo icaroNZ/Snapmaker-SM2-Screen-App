@@ -1,5 +1,6 @@
 package fabscreen.libraries.legacy.data.remote;
 
+import fabscreen.libraries.legacy.server.http.HttpGate;
 import android.os.SystemClock;
 
 import androidx.annotation.NonNull;
@@ -52,7 +53,7 @@ public class SessionManager {
     //endregion
 
     @NonNull
-    Session getSession(Preferences preferences, @NonNull String token) {
+    synchronized Session getSession(Preferences preferences, @NonNull String token) {
         if (mCurrentSession != NULL_SESSION && mCurrentSession.token.equals(token)) {
             return mCurrentSession;
         }
@@ -97,7 +98,7 @@ public class SessionManager {
      *
      * @param session session to be added
      */
-    private void addGrantedSession(@NonNull Session session) {
+    private synchronized void addGrantedSession(@NonNull Session session) {
         if (!session.granted) {
             return;
         }
@@ -111,7 +112,7 @@ public class SessionManager {
         saveGrantedSessions();
     }
 
-    private void removeGrantedSession(@NonNull Session session) {
+    private synchronized void removeGrantedSession(@NonNull Session session) {
         mGrantedSessionList.remove(session);
     }
 
@@ -119,7 +120,7 @@ public class SessionManager {
 
     //region current session
 
-    Session getCurrentSession() {
+    synchronized Session getCurrentSession() {
         return mCurrentSession;
     }
 
@@ -127,15 +128,15 @@ public class SessionManager {
         return mCurrentSessionSubject.hide();
     }
 
-    void setCurrentSession(@NonNull Session session) {
+    synchronized void setCurrentSession(@NonNull Session session) {
         mCurrentSession = session;
-        Logger.d("set Current Session " + session.getToken());
+        Logger.d("set Current Session %s", HttpGate.tokenPrefix(session.getToken()));
         mCurrentSession.lastActive = SystemClock.elapsedRealtime();
 
         mCurrentSessionSubject.onNext(session);
     }
 
-    void grantCurrentSession() {
+    synchronized void grantCurrentSession() {
         if (mCurrentSession.granted) {
             return;
         }
@@ -144,24 +145,24 @@ public class SessionManager {
         addGrantedSession(mCurrentSession);
     }
 
-    void denyCurrentSession() {
+    synchronized void denyCurrentSession() {
         mCurrentSession.granted = false;
 
         setCurrentSession(NULL_SESSION);
     }
 
-    void accessCurrentSession() {
+    synchronized void accessCurrentSession() {
         accessSession(mCurrentSession);
     }
 
-    void checkCurrentSessionActive() {
+    synchronized void checkCurrentSessionActive() {
         long now = SystemClock.elapsedRealtime();
 
         // 5 seconds inactive
         if (mCurrentSession != NULL_SESSION && now - mCurrentSession.lastActive > 5000) {
             Logger.w("Session inactive detected(%dms), closing current session %s",
                     now - mCurrentSession.lastActive,
-                    mCurrentSession.getToken());
+                    HttpGate.tokenPrefix(mCurrentSession.getToken()));
             setCurrentSession(NULL_SESSION);
         }
     }

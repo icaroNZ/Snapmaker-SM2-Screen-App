@@ -1,5 +1,6 @@
 package fabscreen.libraries.legacy.server.http.handlers;
 
+import fabscreen.libraries.legacy.server.http.HttpGate;
 import static fabscreen.libraries.legacy.data.remote.SessionManager.NULL_SESSION;
 
 import com.orhanobut.logger.Logger;
@@ -23,21 +24,28 @@ public class AuthRequestHandler extends BaseRequestHandler {
     private static final String URI_CONNECT = "/api/v1/connect";
     private static final String URI_DISCONNECT = "/api/v1/disconnect";
 
+    private static final Object CONNECT_LOCK = new Object();
+
     @PostMapping(path = URI_CONNECT)
     void requestConnect(HttpRequest request, HttpResponse response) {
         String token = request.getParameter("token");
         Preferences preferences = getModel().getPreferences();
 
+        // SCR-20: check-and-set atomically, so two concurrent connects give one winner and one 403.
+        SessionManager.Session session;
+        boolean reused = false;
+        synchronized (CONNECT_LOCK) {
         // only one pending session is allowed, if there is one, then refuse current one
         SessionManager.Session currentSession = getModel().getRemoteController().getCurrentSession();
         if (currentSession != NULL_SESSION && !currentSession.getToken().equals(token)) {
+            Logger.i("Remote connect refused (403): session %s is current, request token %s",
+                    HttpGate.tokenPrefix(currentSession.getToken()), HttpGate.tokenPrefix(token));
             response.setBody(new StringBody("Failed to connect, there is someone trying to connect to Touchscreen."));
             response.setStatus(HttpResponse.SC_FORBIDDEN);
             return;
         }
 
         // Get related session or create a new session
-        SessionManager.Session session;
         if (token == null) {
             session = getModel().getRemoteController().createSession();
         } else {
@@ -46,12 +54,16 @@ public class AuthRequestHandler extends BaseRequestHandler {
             // if token is invalid or session doesn't exist, then create a new session
             if (session == NULL_SESSION) {
                 session = getModel().getRemoteController().createSession();
+            } else {
+                reused = true;
             }
         }
 
         getModel().getRemoteController().setCurrentSession(session);
+        }
 
-        Logger.i("Receive remote access request, session #%s", session.getToken());
+        Logger.i("Receive remote access request, session #%s (%s, granted %b)", HttpGate.tokenPrefix(session.getToken()),
+                reused ? "reused" : "new", session.isGranted());
 
         JSONObject data = new JSONObject();
         try {
