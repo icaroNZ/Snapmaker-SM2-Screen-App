@@ -27,6 +27,7 @@ import fabscreen.libraries.legacy.data.Constants;
 import fabscreen.libraries.legacy.data.calibration.HeatSoakTracker;
 import fabscreen.libraries.legacy.data.calibration.LevelingParams;
 import fabscreen.libraries.legacy.data.calibration.CalibrationPoint;
+import fabscreen.libraries.legacy.data.calibration.ZOffsetParams;
 import fabscreen.libraries.legacy.lib.LogHelper;
 import fabscreen.libraries.legacy.view.FabConfirm;
 import io.reactivex.Observable;
@@ -62,6 +63,9 @@ public class CalibrationFragment extends BaseFragment {
 
     @BindView(R.id.btn_calibration_save)
     Button mBtnSave;
+
+    @BindView(R.id.tv_calibration_zoffset_probing)
+    TextView mTvZOffsetProbing;
 
     @BindView(R.id.ll_calibration_heat_soak)
     View mViewHeatSoak;
@@ -104,13 +108,21 @@ public class CalibrationFragment extends BaseFragment {
         if (mViewModel.isHeatedLevelingOn() && mViewModel.getHeatedLevelingTemperature() > 0) {
             bedTemp = Math.round(mViewModel.getHeatedLevelingTemperature());
         }
-        // The stock app offers no grid choice on the A150 (grid stays 3 there).
-        final boolean showGrid = getModel().getMachineController().getMachineModel() != Constants.MACHINE_MODEL_SNAPMAKER_A150;
+        // The stock app offers no grid choice on the A150 (grid stays 3 there). The Z-offset calibration
+        // probes only the bed centre, so it asks only for the heat soak.
+        final boolean zOffsetMode = mViewModel.isZOffsetMode();
+        final boolean showGrid = !zOffsetMode
+                && getModel().getMachineController().getMachineModel() != Constants.MACHINE_MODEL_SNAPMAKER_A150;
 
         LevelingOptionsDialog.create(getContext(), showGrid, mViewModel.getGridCount(), bedTemp, mViewModel.getSoakMinutes())
                 .setOnStartListener((grid, temp, soakMinutes) -> {
                     mViewModel.setLevelingOptions(showGrid ? grid : mViewModel.getGridCount(), temp, soakMinutes);
-                    setupCalibrationPanel();
+                    if (zOffsetMode) {
+                        updateZOffsetHeatedBedWarning(mViewModel.isHeatedLevelingOn() || mViewModel.isHeatSoakUsed());
+                        Logger.i("Leveling: Z offset calibration panel");
+                    } else {
+                        setupCalibrationPanel();
+                    }
                     mViewModel.startCalibration();
                     if (!mViewModel.isAutoMode() && (mViewModel.isHeatedLevelingOn() || mViewModel.isHeatSoakUsed())) {
                         showUpHeatedBedWarningDialog();
@@ -141,7 +153,8 @@ public class CalibrationFragment extends BaseFragment {
         // Need to pop up confirm dialog if exiting calibration.
         FabConfirm.create(getContext())
                 .setCanceledOnTouchOutSide(false)
-                .setDescription(mViewModel.isAutoMode() ? R.string.calibration_exit_auto_leveling_confirm_desc
+                .setDescription(mViewModel.isZOffsetMode() ? R.string.calibration_exit_zoffset_confirm_desc
+                        : mViewModel.isAutoMode() ? R.string.calibration_exit_auto_leveling_confirm_desc
                         : R.string.calibration_exit_manual_leveling_confirm_desc)
                 .setConfirm(R.string.all_ok, (dialog, which) -> {
                     dialog.dismiss();
@@ -161,13 +174,21 @@ public class CalibrationFragment extends BaseFragment {
         mBtnSave.setText(needBackHome ? R.string.all_save : R.string.all_complete);
         boolean isAutoMode = mViewModel.isAutoMode();
         boolean isHeatedLeveling = mViewModel.isHeatedLevelingOn();
+        if (mViewModel.isZOffsetMode()) {
+            // only the bed centre is probed: no points panel
+            mGvCalibrationPanel.setVisibility(View.INVISIBLE);
+            mTvZOffsetProbing.setVisibility(View.VISIBLE);
+        }
         if (isAutoMode) {
-            setTitle(R.string.calibration_auto_leveling);
+            setTitle(mViewModel.isZOffsetMode() ? R.string.calibration_zoffset_title : R.string.calibration_auto_leveling);
             mViewModel.getOffsetObservable()
                     .observeOn(AndroidSchedulers.mainThread())
                     .as(bindToLifecycle())
                     .subscribe(isOffset -> {
                         mViewAdjustZOffset.setVisibility(isOffset ? View.VISIBLE : View.GONE);
+                        if (mViewModel.isZOffsetMode()) {
+                            mTvZOffsetProbing.setVisibility(isOffset ? View.GONE : View.VISIBLE);
+                        }
                     });
 
             // warning/picture are set again in setupCalibrationPanel() once the heat soak choice is known
@@ -204,6 +225,51 @@ public class CalibrationFragment extends BaseFragment {
                         showAutoCalibrationFailDialog();
                     }
                 });
+
+        mViewModel.getMeshResultObservable()
+                .observeOn(AndroidSchedulers.mainThread())
+                .as(bindToLifecycle())
+                .subscribe(this::onMeshResult);
+    }
+
+    /**
+     * Auto levelling reply when the stored Z offset was requested (controller a250t.4+).
+     */
+    private void onMeshResult(ZOffsetParams.StatusReply reply) {
+        final String mm = ZOffsetParams.formatMm(reply.offsetUm);
+        if (reply.isOffsetApplied()) {
+            // finished in the controller (mesh saved, nozzle raised): no card step, no save/exit packets
+            FabConfirm.create(getContext())
+                    .setCanceledOnTouchOutSide(false)
+                    .setDescription(getString(R.string.calibration_dialog_mesh_offset_applied, mm))
+                    .setConfirm(R.string.all_ok, (dialog, which) -> {
+                        dialog.dismiss();
+                        finishAfterSave();
+                    })
+                    .show();
+            return;
+        }
+        if (!reply.extended) {
+            // older firmware answered the short form: stock card step, nothing to explain
+            return;
+        }
+        final String desc;
+        switch (reply.status) {
+            case ZOffsetParams.STATUS_OUT_OF_RANGE:
+                desc = getString(R.string.calibration_dialog_zoffset_out_of_range_card_step, mm);
+                break;
+            case ZOffsetParams.STATUS_OTHER_TOOLHEAD:
+                desc = getString(R.string.calibration_dialog_zoffset_other_toolhead_card_step);
+                break;
+            case ZOffsetParams.STATUS_NOT_SET:
+            default:
+                desc = getString(R.string.calibration_dialog_zoffset_not_set_card_step);
+                break;
+        }
+        FabConfirm.create(getContext())
+                .setDescription(desc)
+                .setConfirm(R.string.all_confirm, (dialog, which) -> dialog.dismiss())
+                .show();
     }
 
     private void updateZOffsetHeatedBedWarning(boolean heated) {
@@ -293,7 +359,9 @@ public class CalibrationFragment extends BaseFragment {
             return;
         }
         final int desc;
-        if (!mViewModel.isAutoMode()) {
+        if (mViewModel.isZOffsetMode()) {
+            desc = R.string.calibration_dialog_zoffset_fail_desc;
+        } else if (!mViewModel.isAutoMode()) {
             desc = R.string.calibration_dialog_leveling_start_fail_desc;
         } else if (mViewModel.isHeatSoakUsed()) {
             desc = R.string.calibration_dialog_heat_soak_leveling_fail_desc;
@@ -387,7 +455,8 @@ public class CalibrationFragment extends BaseFragment {
                     mBtnMoveUp.setEnabled(!isMoving);
                     mBtnMoveDown.setEnabled(!isMoving);
                     mBtnNextPoint.setEnabled(!isMoving && !mViewModel.isAllPointSelected());
-                    mBtnSave.setEnabled(!isMoving && mViewModel.isAllPointSelected() && mViewModel.isAdjustZOffset());
+                    mBtnSave.setEnabled(!isMoving && (mViewModel.isZOffsetMode() || mViewModel.isAllPointSelected())
+                            && mViewModel.isAdjustZOffset());
                     mAdapter.setButtonsEnabled(!isMoving && !mViewModel.isAutoMode());
                 });
     }
@@ -418,30 +487,99 @@ public class CalibrationFragment extends BaseFragment {
 
     @OnClick(R.id.btn_calibration_save)
     void onClickSave() {
+        if (mViewModel.isZOffsetMode()) {
+            saveZOffset();
+            return;
+        }
         mViewModel.saveCalibration()
                 .observeOn(AndroidSchedulers.mainThread())
                 .as(bindToLifecycle())
                 .subscribe(s -> {
                     Logger.d("3DP Calibration Saved.");
+                    finishAfterSave();
+                }, LogHelper::log);
+    }
 
-                    if (mViewModel.isHeatedLevelingOn()) {
-                        // Set temperature into preferences.
-                        final float heatedLevelingTemp = mViewModel.getHeatedLevelingTemperature();
-                        getModel().getPreferences().set3DPCalibrationHeatedUpTemperature(heatedLevelingTemp);
+    /**
+     * Z-offset calibration Save (0x09 0x07): the controller stores the offset (err 0) or refuses (err 1,
+     * then the levelling session is over: retry runs the centre probe again).
+     */
+    private void saveZOffset() {
+        mViewModel.saveCalibration()
+                .observeOn(AndroidSchedulers.mainThread())
+                .as(bindToLifecycle())
+                .subscribe(stored -> {
+                    Logger.i("Leveling: Z offset save %s", stored ? "stored" : "refused");
+                    if (!stored) {
+                        showZOffsetNotStoredDialog();
+                        return;
                     }
+                    mViewModel.queryZOffset()
+                            .observeOn(AndroidSchedulers.mainThread())
+                            .as(bindToLifecycle())
+                            .subscribe(reply -> {
+                                Logger.i("Leveling: Z offset after save %s", reply);
+                                showZOffsetSavedDialog(getString(R.string.calibration_dialog_zoffset_saved,
+                                        ZOffsetParams.formatMm(reply.offsetUm)));
+                            }, e -> {
+                                Logger.w("Leveling: Z offset query after save failed (%s)", e.toString());
+                                showZOffsetSavedDialog(getString(R.string.calibration_dialog_zoffset_saved_no_value));
+                            });
+                }, LogHelper::log);
+    }
+
+    private void showZOffsetSavedDialog(String desc) {
+        FabConfirm.create(getContext())
+                .setCanceledOnTouchOutSide(false)
+                .setDescription(desc)
+                .setConfirm(R.string.all_ok, (dialog, which) -> {
+                    dialog.dismiss();
+                    finishAfterSave();
+                })
+                .show();
+    }
+
+    private void showZOffsetNotStoredDialog() {
+        FabConfirm.create(getContext())
+                .setCanceledOnTouchOutSide(false)
+                .setIcon(R.drawable.pic_dialog_warning_72x72)
+                .setDescription(R.string.calibration_dialog_zoffset_not_stored)
+                .setConfirm(R.string.all_retry, (dialog, which) -> {
+                    dialog.dismiss();
+                    mViewModel.retryCalibration();
+                })
+                .setCancel(R.string.all_quit, (dialog, which) -> {
+                    dialog.dismiss();
                     if (mViewModel.isHeatedLevelingOn() || mViewModel.isHeatSoakUsed()) {
-                        // Turn off heated bed for safe when calibration was done already
-                        // (the controller keeps the soak temperature after levelling).
-                        Logger.i("Leveling: saved, turning the bed off");
                         mViewModel.turnOffBed();
                     }
+                    quitCalibration();
+                })
+                .show();
+    }
 
-                    Intent intent = requireActivity().getIntent();
-                    if (intent != null && intent.getBooleanExtra(Router.IntentKeys.NEED_BACK_HOME, false)) {
-                        backToHome(HomeActivity.class);
-                    } else {
-                        finishWithResultOk();
-                    }
-                }, LogHelper::log);
+    /**
+     * After a successful save (or a mesh finished with the stored Z offset): remember the stock pre-heat
+     * temperature, turn the bed off if it was heated, then go home or back to the caller.
+     */
+    private void finishAfterSave() {
+        if (mViewModel.isHeatedLevelingOn()) {
+            // Set temperature into preferences.
+            final float heatedLevelingTemp = mViewModel.getHeatedLevelingTemperature();
+            getModel().getPreferences().set3DPCalibrationHeatedUpTemperature(heatedLevelingTemp);
+        }
+        if (mViewModel.isHeatedLevelingOn() || mViewModel.isHeatSoakUsed()) {
+            // Turn off heated bed for safe when calibration was done already
+            // (the controller keeps the soak temperature after levelling).
+            Logger.i("Leveling: saved, turning the bed off");
+            mViewModel.turnOffBed();
+        }
+
+        Intent intent = requireActivity().getIntent();
+        if (intent != null && intent.getBooleanExtra(Router.IntentKeys.NEED_BACK_HOME, false)) {
+            backToHome(HomeActivity.class);
+        } else {
+            finishWithResultOk();
+        }
     }
 }

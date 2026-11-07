@@ -34,6 +34,20 @@
             android:scrollbars="none"
             android:stretchMode="none" />
 
+        <!-- Z-offset calibration (controller a250t.4+): only the bed centre is probed, no points panel -->
+        <TextView
+            android:id="@+id/tv_calibration_zoffset_probing"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:layout_marginStart="@dimen/margin_layout_20"
+            android:layout_marginEnd="@dimen/margin_layout_20"
+            android:text="@string/calibration_zoffset_probing"
+            android:textAlignment="center"
+            android:textColor="@color/default_theme_desc1"
+            android:textSize="@dimen/font_size_h4"
+            android:visibility="gone" />
+
         <RelativeLayout
             android:id="@+id/rl_calibration_panel_z_offset"
             android:layout_width="match_parent"
