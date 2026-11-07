@@ -44,43 +44,33 @@
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintTop_toBottomOf="@id/tv_set_calibration_grid_title" />
 
-        <co.ceryle.segmentedbutton.SegmentedButtonGroup
-            android:id="@+id/sbg_calibration_grid"
-            style="@style/AppTheme.SegmentedButtonGroup"
-            android:layout_width="match_parent"
-            android:layout_height="@dimen/height_segmented_button"
-            android:layout_marginStart="@dimen/margin_layout_10"
+        <!-- 3x3..11x11 (firmware GRID_MAX_NUM 11); was a 3/4/5 segmented group -->
+        <LinearLayout
+            android:id="@+id/ll_calibration_grid_stepper"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
             android:layout_marginTop="@dimen/margin_layout_40"
-            android:layout_marginEnd="@dimen/margin_layout_10"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
             app:layout_constraintEnd_toEndOf="parent"
             app:layout_constraintStart_toStartOf="parent"
-            app:layout_constraintTop_toBottomOf="@id/tv_set_calibration_grid_value"
-            app:sbg_position="0">
+            app:layout_constraintTop_toBottomOf="@id/tv_set_calibration_grid_value">
 
             <Button
-                android:layout_width="wrap_content"
-                android:layout_height="match_parent"
-                android:paddingTop="8dp"
-                android:text="@string/all_3"
-                android:textAllCaps="false"
-                android:textColor="@color/default_theme_desc1" />
+                android:id="@+id/btn_3dp_calibration_grid_minus"
+                style="@style/LevelingOptionStepButton"
+                android:layout_width="@dimen/height_button_64"
+                android:layout_height="@dimen/height_button_45"
+                android:text="@string/settings_3dp_calibration_grid_minus" />
 
             <Button
-                android:layout_width="wrap_content"
-                android:layout_height="match_parent"
-                android:paddingTop="8dp"
-                android:text="@string/all_4"
-                android:textAllCaps="false"
-                android:textColor="@color/default_theme_desc1" />
-
-            <Button
-                android:layout_width="wrap_content"
-                android:layout_height="match_parent"
-                android:paddingTop="8dp"
-                android:text="@string/all_5"
-                android:textAllCaps="false"
-                android:textColor="@color/default_theme_desc1" />
-        </co.ceryle.segmentedbutton.SegmentedButtonGroup>
+                android:id="@+id/btn_3dp_calibration_grid_plus"
+                style="@style/LevelingOptionStepButton"
+                android:layout_width="@dimen/height_button_64"
+                android:layout_height="@dimen/height_button_45"
+                android:layout_marginStart="@dimen/margin_layout_40"
+                android:text="@string/settings_3dp_calibration_grid_plus" />
+        </LinearLayout>
 
         <ImageView
             android:id="@+id/iv_calibration_grid"
@@ -90,7 +80,7 @@
             app:layout_constraintBottom_toBottomOf="parent"
             app:layout_constraintEnd_toEndOf="parent"
             app:layout_constraintStart_toStartOf="parent"
-            app:layout_constraintTop_toBottomOf="@id/sbg_calibration_grid" />
+            app:layout_constraintTop_toBottomOf="@id/ll_calibration_grid_stepper" />
 
     </androidx.constraintlayout.widget.ConstraintLayout>
 
