@@ -16,6 +16,16 @@ public class FabPacketInputStream implements Closeable {
 
     private static int DEFAULT_BUFFER_SIZE = 8192;
 
+    /**
+     * Largest data length (event id + payload) accepted in a frame header. Same limit as the controller
+     * (Snapmaker2-Controller snapmaker/src/common/protocol_sstp.h SSTP_INVALID_DATA_LENGTH = 1024).
+     * A header outside 1..MAX_DATA_LENGTH is a false marker match: skip one byte and resync.
+     */
+    public static final int MAX_DATA_LENGTH = 1024;
+
+    /** Number of false headers skipped since the stream was created (diagnostics). */
+    private volatile long mResyncCount;
+
     private volatile byte buf[];
 
     // length of valid data in buf
@@ -42,14 +52,24 @@ public class FabPacketInputStream implements Closeable {
         return buffer;
     }
 
+    /**
+     * Read up to {@code length} more bytes into the buffer, growing (and compacting) it first so the
+     * bytes always fit. The grown array is stored in {@link #buf}; callers must re-read {@code buf}
+     * after calling this (SCR-02: the old code grew only a local copy).
+     */
     private int fill(int length) throws IOException {
         byte[] buffer = getBufIfOpen();
         if (count + length >= buffer.length) {
-            int nsz = buffer.length * 2;
+            int needed = (count - pos) + length + 1;
+            int nsz = buffer.length;
+            while (nsz < needed) {
+                nsz *= 2;
+            }
             byte[] nbuf = new byte[nsz];
             System.arraycopy(buffer, pos, nbuf, 0, count - pos);
             count -= pos;
             pos = 0;
+            buf = nbuf;
             buffer = nbuf;
         }
 
@@ -94,6 +114,7 @@ public class FabPacketInputStream implements Closeable {
             // marker no found, fill 128 bytes and start over
             if (pos + 1 >= count) {
                 int f = fill(128);
+                buffer = getBufIfOpen();
                 if (f == -1) {
                     return null;
                 }
@@ -102,6 +123,7 @@ public class FabPacketInputStream implements Closeable {
 
             if (pos + 8 > count) {
                 int f = fullfill(pos + 8 - count);
+                buffer = getBufIfOpen();
                 if (f == -1) {
                     return null;
                 }
@@ -111,8 +133,18 @@ public class FabPacketInputStream implements Closeable {
             if ((buffer[pos + 2] ^ buffer[pos + 3]) == buffer[pos + 5]) {
                 int length = (buffer[pos + 2] & 0xFF) * 0x100 + (buffer[pos + 3] & 0xFF);
 
+                if (length == 0 || length > MAX_DATA_LENGTH) {
+                    // False marker match (or corrupt header): resync from the next byte.
+                    // Not logged here: this class is also used by host tests; SerialConnection
+                    // reports getResyncCount() changes.
+                    mResyncCount++;
+                    pos++;
+                    continue;
+                }
+
                 if (pos + 8 + length > count) {
                     int f = fullfill(pos + 8 + length - count);
+                    buffer = getBufIfOpen();
                     if (f == -1) {
                         return null;
                     }
@@ -130,12 +162,18 @@ public class FabPacketInputStream implements Closeable {
                     pos += 8 + length;
                     return new FabPacket(packet);
                 } else {
+                    mResyncCount++;
                     pos++;
                 }
             } else {
                 pos++;
             }
         }
+    }
+
+    /** Number of headers rejected (bad length or bad checksum) since this stream was created. */
+    public long getResyncCount() {
+        return mResyncCount;
     }
 
     @Override
