@@ -243,6 +243,12 @@ public class MockSlaveComputer implements ISlaveComputer {
     }
 
     @Override
+    public Observable<Boolean> startAutoCalibration(int grid, int bedTemp, int soakSeconds) {
+        // The mock does not simulate heating; the progress emitter completes the request.
+        return mAutoCalibration;
+    }
+
+    @Override
     public Observable<Integer> getAutoCalibrationProgress() {
         PublishSubject<Integer> subject = PublishSubject.create();
         int[] points = new int[]{1, 2, 3, 6, 9, 8, 7, 4, 5};
@@ -267,6 +273,11 @@ public class MockSlaveComputer implements ISlaveComputer {
 
     @Override
     public Observable<Boolean> startManualCalibration(int grid) {
+        return Observable.just(true);
+    }
+
+    @Override
+    public Observable<Boolean> startManualCalibration(int grid, int bedTemp, int soakSeconds) {
         return Observable.just(true);
     }
 

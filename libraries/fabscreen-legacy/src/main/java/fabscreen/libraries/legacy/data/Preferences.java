@@ -3,6 +3,8 @@ package fabscreen.libraries.legacy.data;
 import android.content.Context;
 import android.content.SharedPreferences;
 
+import fabscreen.libraries.legacy.data.calibration.LevelingParams;
+
 public class Preferences {
     // machine
     private static final String MACHINE_NAME = "MACHINE_NAME";
@@ -60,6 +62,8 @@ public class Preferences {
     private static final String A3DP_CALIBRATION_GRID = "3DP_CALIBRATION_GRID";
     private static final String A3DP_CALIBRATION_HEATED_LEVELING_ON = "3DP_CALIBRATION_HEATED_LEVELING_ON";
     private static final String A3DP_CALIBRATION_HEATED_UP_TEMPERATURE = "3DP_CALIBRATION_HEATED_UP_TEMPERATURE";
+    private static final String A3DP_CALIBRATION_SOAK_BED_TEMPERATURE = "3DP_CALIBRATION_SOAK_BED_TEMPERATURE";
+    private static final String A3DP_CALIBRATION_SOAK_MINUTES = "3DP_CALIBRATION_SOAK_MINUTES";
 
     //3DP dual
     private static final String A3DP_DUAL_NEED_DO_Z_HEIGHT_CALIBRATION = "A3DP_DUAL_NEED_DO_Z_HEIGHT_CALIBRATION";
@@ -182,6 +186,8 @@ public class Preferences {
         set3DPFastCalibrationOn(true);
         set3DPCalibrationHeatedLevelingOn(false);
         set3DPCalibrationHeatedUpTemperature(70.0f);
+        set3DPCalibrationSoakBedTemperature(LevelingParams.BED_TEMP_DEFAULT);
+        set3DPCalibrationSoakMinutes(LevelingParams.SOAK_MINUTES_DEFAULT);
         setLaserCalibrationMode(0);
         setLaser4AxisCalibrationMode(1);
 
@@ -547,6 +553,29 @@ public class Preferences {
 
     public void set3DPCalibrationHeatedUpTemperature(float temperature) {
         setPref(A3DP_CALIBRATION_HEATED_UP_TEMPERATURE, temperature);
+    }
+
+    /**
+     * Bed temperature (C) the firmware heats to before levelling (heat soak), 0 = no heating.
+     * Separate from the screen-side pre-heat temperature above (default 70) on purpose.
+     */
+    public int get3DPCalibrationSoakBedTemperature() {
+        return LevelingParams.clampBedTemperature(
+                getPref(A3DP_CALIBRATION_SOAK_BED_TEMPERATURE, LevelingParams.BED_TEMP_DEFAULT));
+    }
+
+    public void set3DPCalibrationSoakBedTemperature(int temperature) {
+        setPref(A3DP_CALIBRATION_SOAK_BED_TEMPERATURE, LevelingParams.clampBedTemperature(temperature));
+    }
+
+    /** Minutes the bed soaks at temperature before levelling, 0..60. */
+    public int get3DPCalibrationSoakMinutes() {
+        return LevelingParams.clampSoakMinutes(
+                getPref(A3DP_CALIBRATION_SOAK_MINUTES, LevelingParams.SOAK_MINUTES_DEFAULT));
+    }
+
+    public void set3DPCalibrationSoakMinutes(int minutes) {
+        setPref(A3DP_CALIBRATION_SOAK_MINUTES, LevelingParams.clampSoakMinutes(minutes));
     }
 
     // -- Laser

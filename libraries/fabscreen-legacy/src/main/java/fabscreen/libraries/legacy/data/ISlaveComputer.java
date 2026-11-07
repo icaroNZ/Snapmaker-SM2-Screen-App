@@ -112,11 +112,23 @@ public interface ISlaveComputer {
 
     Observable<Boolean> startAutoCalibration(int grid);
 
+    /**
+     * Auto levelling with optional heat soak (0x09 0x02 grid bed_temp soak_s). bedTemp 0 = stock request.
+     * The reply only arrives after heat-up + soak + probing; it is false on any controller error.
+     */
+    Observable<Boolean> startAutoCalibration(int grid, int bedTemp, int soakSeconds);
+
     Observable<Integer> getAutoCalibrationProgress();
 
     Observable<Boolean> startManualCalibration();
 
     Observable<Boolean> startManualCalibration(int grid);
+
+    /**
+     * Manual levelling with optional heat soak (0x09 0x04 grid bed_temp soak_s). bedTemp 0 = stock request.
+     * The reply arrives after heat-up + soak + homing; it is false on any controller error.
+     */
+    Observable<Boolean> startManualCalibration(int grid, int bedTemp, int soakSeconds);
 
     Observable<Boolean> gotoCalibrationPoint(int point);
 

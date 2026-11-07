@@ -465,6 +465,18 @@ public class SerialController implements ISlaveComputer {
         return request(packet).map(o -> (Boolean) o);
     }
 
+    /**
+     * Settings: Start Auto Calibration with heat soak (0x09 0x02 grid bed_temp soak_s).
+     * No timeout: the controller answers after heat-up + soak + probing.
+     */
+    @Override
+    public Observable<Boolean> startAutoCalibration(int grid, int bedTemp, int soakSeconds) {
+        FabPacket packet = FabPacketBuilder.startAutoCalibration(grid, bedTemp, soakSeconds);
+        Logger.i("Leveling: request auto, grid %d, bed %d C, soak %d s, content %s",
+                grid, bedTemp, soakSeconds, toHex(packet.getContent()));
+        return request(packet).map(o -> (Boolean) o);
+    }
+
     @Override
     public Observable<Integer> getAutoCalibrationProgress() {
         return mAutoCalibrationProgressSubject;
@@ -483,6 +495,26 @@ public class SerialController implements ISlaveComputer {
     public Observable<Boolean> startManualCalibration(int grid) {
         FabPacket packet = FabPacketBuilder.startManualCalibration(grid);
         return request(packet).map(o -> (Boolean) o);
+    }
+
+    /**
+     * Settings: Start Manual Calibration with heat soak (0x09 0x04 grid bed_temp soak_s).
+     * No timeout: the controller answers after heat-up + soak + homing.
+     */
+    @Override
+    public Observable<Boolean> startManualCalibration(int grid, int bedTemp, int soakSeconds) {
+        FabPacket packet = FabPacketBuilder.startManualCalibration(grid, bedTemp, soakSeconds);
+        Logger.i("Leveling: request manual, grid %d, bed %d C, soak %d s, content %s",
+                grid, bedTemp, soakSeconds, toHex(packet.getContent()));
+        return request(packet).map(o -> (Boolean) o);
+    }
+
+    private static String toHex(byte[] bytes) {
+        StringBuilder sb = new StringBuilder();
+        for (byte b : bytes) {
+            sb.append(String.format(Locale.US, "%02X ", b & 0xFF));
+        }
+        return sb.toString().trim();
     }
 
     /**
@@ -1229,13 +1261,18 @@ public class SerialController implements ISlaveComputer {
                         break;
                     }
                     case 0x02:
-                        if (packet.getContent()[1] != 0) {
-                            // Auto calibration fail.
+                    case 0x04:
+                        if (packet.getContent().length > 1 && packet.getContent()[1] != 0) {
+                            // Auto/manual levelling start failed. err: 1 = heat soak aborted or no 3DP head,
+                            // 2 = bad grid/payload, 11 = bed fault, 205 = probing failed (a250t.3 contract).
+                            final int err = packet.getContent()[1] & 0xFF;
+                            Logger.w("Leveling: 0x0a 0x%02x failed, err %d", subEventId, err);
                             RequestReceiver receiver = mReceivers.get(packet.getKey());
-                            receiver.receive(false);
+                            if (receiver != null) {
+                                receiver.receive(false);
+                            }
                             break;
                         }
-                    case 0x04:
                     case 0x05:
                     case 0x06:
                     case 0x07:
