@@ -66,7 +66,7 @@ public class FabPacket {
     }
 
     public byte getSubeventId() {
-        if (content.length == 0) {
+        if (content == null || content.length == 0) {
             return 0;
         }
         return content[0];
@@ -112,11 +112,20 @@ public class FabPacket {
         return ((~sum) & 0xFFFF);
     }
 
+    /**
+     * Key that pairs a request with its reply: the request/response event id pair, plus the operation
+     * byte for event ids above 0x04. Event ids are compared unsigned (SCR-16): 0xa9/0xaa are negative
+     * as a Java byte, so the old signed test gave every update sub-command (start, package request,
+     * controller version, module version) the same key 170000.
+     */
     public int getKey() {
-        if (eventId <= 0x04) {
-            return ((eventId + 1) & 0xFE) * 1000;
+        if ((eventId & 0xFF) <= 0x04) {
+            return (((eventId & 0xFF) + 1) & 0xFE) * 1000;
+        } else if (content == null || content.length == 0) {
+            // Malformed frame with no operation byte (SCR-05): never index content[0].
+            return (((eventId & 0xFF) + 1) & 0xFE) * 1000;
         } else {
-            return ((eventId + 1) & 0xFE) * 1000 + content[0];
+            return (((eventId & 0xFF) + 1) & 0xFE) * 1000 + content[0];
         }
     }
 

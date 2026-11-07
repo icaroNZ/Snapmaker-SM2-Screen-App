@@ -26,6 +26,7 @@ import fabscreen.libraries.legacy.data.calibration.ZOffsetParams;
 import fabscreen.libraries.legacy.data.serial.fabpacket.FabPacket;
 import fabscreen.libraries.legacy.data.serial.fabpacket.FabPacketBuilder;
 import fabscreen.libraries.legacy.data.serial.fabpacket.FabPacketContent;
+import fabscreen.libraries.legacy.data.serial.fabpacket.FrameDiagnostics;
 import fabscreen.libraries.legacy.data.serial.fabpacket.content.ExtruderModel;
 import fabscreen.libraries.legacy.data.serial.fabpacket.content.ExtruderTemperature;
 import fabscreen.libraries.legacy.lib.FabException;
@@ -1141,6 +1142,12 @@ public class SerialController implements ISlaveComputer {
      */
     private void onReceive(FabPacket packet) {
         mLastReceiveTimeMillis = SystemClock.elapsedRealtime();
+
+        // SCR-05: the dispatcher below reads content[0] for every event id above 0x04.
+        if (!FrameDiagnostics.hasOperationByte(packet)) {
+            Logger.e("Bad SSTP frame, no operation byte: %s", FrameDiagnostics.describe(packet));
+            return;
+        }
         // Too many logs, comment it out unless you are debugging the heartbeat.
 //        Log.i(TAG, "Receive event " + packet.getEventId() + ": " + packet + " time: " + mLastReceiveTimeMillis);
 

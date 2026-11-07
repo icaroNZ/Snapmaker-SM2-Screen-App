@@ -12,9 +12,11 @@ import fabscreen.libraries.legacy.data.Model;
 import fabscreen.libraries.legacy.data.MultiLanguageManager;
 import fabscreen.libraries.legacy.lib.DPCHelper;
 import fabscreen.libraries.legacy.lib.LogHelper;
+import fabscreen.libraries.legacy.lib.RxErrorPolicy;
 import fabscreen.libraries.legacy.server.http.HTTPServer;
 import fabscreen.libraries.legacy.server.socket.DiscoverServer;
 import fabscreen.libraries.legacy.service.SerialPortService;
+import io.reactivex.plugins.RxJavaPlugins;
 
 public class FabScreenApplication extends BaseApplication {
     private static FabScreenApplication sApplication;
@@ -40,6 +42,8 @@ public class FabScreenApplication extends BaseApplication {
 
         Logger.i("Application started!");
 
+        installRxErrorHandler();
+
         // Touchscreen of Snapmaker 2.0 comes with SDK 25 (N_MR1)
         Logger.d("Build SDK version: %d", Build.VERSION.SDK_INT);
 
@@ -64,6 +68,22 @@ public class FabScreenApplication extends BaseApplication {
         startDiscoverServer();
 
         startHttpServer();
+    }
+
+    /**
+     * SCR-05: errors that reach no subscriber (e.g. a serial write after a disconnect) used to be
+     * rethrown by RxJava and crash the app. Log them instead.
+     */
+    private void installRxErrorHandler() {
+        RxJavaPlugins.setErrorHandler(e -> {
+            Throwable cause = RxErrorPolicy.unwrap(e);
+            if (RxErrorPolicy.classify(e) == RxErrorPolicy.Action.IGNORE) {
+                Logger.d("Rx: undeliverable %s after dispose: %s", cause.getClass().getSimpleName(), cause.getMessage());
+            } else {
+                Logger.e("Rx: undeliverable error (no subscriber handled it): %s", cause);
+                LogHelper.log(cause);
+            }
+        });
     }
 
     private String getBuildTime() {

@@ -1,6 +1,9 @@
 package fabscreen.libraries.legacy.data.serial;
 
+import android.os.SystemClock;
 import android.util.Log;
+
+import com.orhanobut.logger.Logger;
 
 import java.io.File;
 import java.io.IOException;
@@ -8,6 +11,7 @@ import java.io.InputStream;
 
 import fabscreen.libraries.legacy.data.serial.fabpacket.FabPacket;
 import fabscreen.libraries.legacy.data.serial.fabpacket.FabPacketInputStream;
+import fabscreen.libraries.legacy.data.serial.fabpacket.FrameDiagnostics;
 import fabscreen.libraries.legacy.lib.serialport.SerialPort;
 import io.reactivex.Scheduler;
 import io.reactivex.disposables.Disposable;
@@ -75,7 +79,7 @@ public class SerialConnection {
     /**
      * Connect to given serial port device.
      */
-    public void connect(String device) {
+    public synchronized void connect(String device) {
         if (isConnected()) {
             disconnect();
         }
@@ -99,7 +103,16 @@ public class SerialConnection {
                 .subscribeOn(Schedulers.io())
                 .observeOn(Schedulers.io())
                 .subscribe(p -> {
-                    mSerialPort.getOutputStream().write(p.toByteArray());
+                    SerialPort port = mSerialPort;
+                    if (port == null) {
+                        Logger.w("Serial: write dropped, port already closed (eid=0x%02X)", p.getEventId() & 0xFF);
+                        return;
+                    }
+                    port.getOutputStream().write(p.toByteArray());
+                }, e -> {
+                    // SCR-05: a failed write used to reach RxJava's global handler and crash the app.
+                    Logger.e("Serial: write failed (%s), disconnecting", e);
+                    disconnect();
                 });
 
         // Read byte streams from serial port and parse as FabPacket
@@ -108,14 +121,43 @@ public class SerialConnection {
             InputStream in = mSerialPort.getInputStream();
             FabPacketInputStream is = new FabPacketInputStream(in);
 
+            long reportedResyncs = 0;
+            long lastResyncLogMs = 0;
+            long badFrames = 0;
+            long lastBadFrameLogMs = 0;
             while (true) {
+                FabPacket packet = null;
                 try {
-                    FabPacket packet = is.readPacket();
+                    packet = is.readPacket();
+
+                    // SCR-02: report rejected headers, at most once a second.
+                    long resyncs = is.getResyncCount();
+                    if (resyncs != reportedResyncs) {
+                        long now = SystemClock.elapsedRealtime();
+                        if (now - lastResyncLogMs >= 1000) {
+                            Logger.w("SSTP resync: %d false/corrupt headers skipped (total %d)",
+                                    resyncs - reportedResyncs, resyncs);
+                            reportedResyncs = resyncs;
+                            lastResyncLogMs = now;
+                        }
+                    }
+
                     if (packet != null && mSerialDataListener != null) {
                         mSerialDataListener.onReceive(packet);
                     }
+                } catch (RuntimeException e) {
+                    // SCR-05: one malformed frame (or a bug in a reply parser) must not kill the
+                    // reader thread, which used to crash FabScreen and stop the print stream.
+                    badFrames++;
+                    long now = SystemClock.elapsedRealtime();
+                    if (now - lastBadFrameLogMs >= 1000) {
+                        Logger.e("Bad SSTP frame (%d so far): %s; %s", badFrames,
+                                FrameDiagnostics.describe(packet), e);
+                        lastBadFrameLogMs = now;
+                    }
                 } catch (IOException e) {
                     // disconnect when IOException raises
+                    Logger.w("Serial: read failed (%s), disconnecting", e);
                     disconnect();
 
                     // close input stream
@@ -138,13 +180,20 @@ public class SerialConnection {
     /**
      * Disconnect from serial port.
      */
-    public void disconnect() {
+    public synchronized void disconnect() {
+        // synchronized + null checks (SCR-18): the reader thread, the write error handler and the
+        // service can all call this; the old check-then-act could NPE on mReadWorker.
         if (isConnected()) {
-            mReadWorker.dispose();
-            mReadWorker = null;
+            Logger.i("Serial: disconnect (thread %s)", Thread.currentThread().getName());
+            if (mReadWorker != null) {
+                mReadWorker.dispose();
+                mReadWorker = null;
+            }
 
-            mWriteSubscription.dispose();
-            mWriteSubscription = null;
+            if (mWriteSubscription != null) {
+                mWriteSubscription.dispose();
+                mWriteSubscription = null;
+            }
 
             mWriteSerializedSubject = null;
             mWriteSubject = null;
