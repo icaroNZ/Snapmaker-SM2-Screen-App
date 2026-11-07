@@ -47,8 +47,12 @@ import fabscreen.libraries.legacy.BaseApplication;
 import fabscreen.libraries.legacy.lib.file.FabLocalFile;
 import fabscreen.libraries.legacy.lib.file.IFile;
 import fabscreen.libraries.legacy.lib.file.IFileManager;
+import fabscreen.libraries.legacy.server.http.HttpGate;
 
 public class FabStandardMultipartResolver implements FabMultipartResolver {
+
+    /** Free space that must remain after an upload (same margin the old cleanup used). */
+    private static final long UPLOAD_RESERVE_BYTES = 32L * 1024 * 1024;
 
     private DiskFileItemFactory mFileItemFactory;
     private FileUpload mFileUpload;
@@ -113,41 +117,20 @@ public class FabStandardMultipartResolver implements FabMultipartResolver {
         try {
             RequestBody body = request.getBody();
             Assert.notNull(body, "The body cannot be null.");
-            BodyContext bodyContext = new BodyContext((body));
+            // SCR-09: this runs before routing and before any token check, so it must never
+            // delete anything. It used to delete the oldest stored files (including workspace/,
+            // the power-loss recovery copy) whenever the client-supplied Content-Length exceeded
+            // the free space. Now an upload that does not fit is refused with 413.
+            long contentLength = request.getContentLength();
             StatFs statFs = new StatFs(Environment.getDataDirectory().getPath());
-            Logger.d("Debug: bodyContext %d, availableSpace %d", bodyContext.getContentLength(), statFs.getAvailableBytes());
-            int requireSpace = bodyContext.getContentLength();
-            if (requireSpace > statFs.getAvailableBytes()) {
-                IFileManager fileManager = BaseApplication.getInstance().getFabLocalFileManager();
-                fileManager.mount();
-                // FIXME: Workaround, using File IO API to prevent Observable subscribe with IFileManager
-                File rootFile = (File) fileManager.getRootFile().getFile();
-                ArrayList<IFile> fileList = new ArrayList<>();
-                File[] files = rootFile.listFiles();
-                for (File file : files) {
-                    fileList.add(new FabLocalFile(file));
-                }
-                long availableSpace = fileManager.getTotalSpace() - fileManager.getUsedSpace();
-
-                fileList.sort(Comparator.comparingLong(IFile::lastModified));
-                long count = 0;
-                ArrayList<IFile> deleteFiles = new ArrayList<>();
-                for (int i = 0; i < fileList.size(); i++) {
-                    IFile tempFile = fileList.get(i);
-                    // Should we add more buffer in case of System r/w(to be further investigate)
-                    if (count + availableSpace < requireSpace  + (32 * 1024 * 1024)) {
-                        // skip files that start with '.'
-                        if (!tempFile.getName().startsWith(".")) {
-                            count += tempFile.length();
-                            deleteFiles.add(tempFile);
-                        }
-                    }
-                }
-                for (IFile file2 : deleteFiles) {
-                    Logger.d("Start deleting file " + file2.getName());
-                    fileManager.removeFile(file2);
-                }
-                Logger.d("Delete completed.");
+            long available = statFs.getAvailableBytes();
+            Logger.w("Multipart upload: %s Content-Length %d, free %d MB", request.getPath(),
+                    contentLength, available / (1024 * 1024));
+            if (!HttpGate.uploadFits(contentLength, available, UPLOAD_RESERVE_BYTES)) {
+                Logger.w("Multipart upload refused (413): needs %d MB + %d MB reserve, free %d MB",
+                        contentLength / (1024 * 1024), UPLOAD_RESERVE_BYTES / (1024 * 1024),
+                        available / (1024 * 1024));
+                throw new MaxUploadSizeExceededException(Math.max(0, available - UPLOAD_RESERVE_BYTES));
             }
             List<FileItem> fileItems = fileUpload.parseRequest(new BodyContext(body));
             return parseFileItems(fileItems, encoding);
@@ -160,9 +143,6 @@ public class FabStandardMultipartResolver implements FabMultipartResolver {
         } catch (FileUploadException ex) {
             Logger.d("FileUploadException " + ex.getMessage());
             throw new MultipartException("Failed to parse multipart servlet request.", ex);
-        } catch (IOException ex) {
-            Logger.d("IOException " + ex.getMessage());
-            throw new MultipartException("Failed to clear up space for multipart.", ex);
         }
     }
 
