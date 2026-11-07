@@ -13,8 +13,16 @@ import com.yanzhenjie.andserver.http.HttpResponse;
 import fabscreen.libraries.legacy.BaseApplication;
 import fabscreen.libraries.legacy.data.Model;
 import fabscreen.libraries.legacy.data.remote.SessionManager;
+import fabscreen.libraries.legacy.server.http.HttpGate;
 
 public class BaseRequestHandler {
+    /** SCR-13: longest an HTTP handler waits for a controller reply (pause/stop/G-code). */
+    protected static final int HTTP_COMMAND_TIMEOUT_S = 30;
+    /** SCR-13: longest execute_code waits for "ok" (G28 homing on an A350 can take a while). */
+    protected static final int HTTP_GCODE_TIMEOUT_S = 120;
+    /** SCR-08/13: longest an HTTP handler waits for a G-code file to be parsed. */
+    protected static final int HTTP_PARSE_TIMEOUT_S = 120;
+
     protected Model getModel() {
         return BaseApplication.getInstance().getModel();
     }
@@ -46,6 +54,37 @@ public class BaseRequestHandler {
             response.setStatus(HttpResponse.SC_UNAUTHORIZED);
             return false;
         }
+    }
+
+    /**
+     * SCR-01/SCR-04: refuse (409) when a job is running or paused, so an HTTP call cannot move the
+     * machine or replace/reset the running job. Returns true when the request was refused.
+     */
+    protected boolean refuseIfBusy(HttpRequest request, HttpResponse response) {
+        int printerStatus = getModel().getMachineController().getMachineStatus().printerStatus;
+        int jobState = getModel().getPrintController().getPrintJobState().getValue();
+        if (HttpGate.isBusy(printerStatus, jobState)) {
+            Logger.w("HTTP %s refused (409): machine busy (printerStatus %d, job state %d, token %s)",
+                    request.getPath(), printerStatus, jobState, HttpGate.tokenPrefix(request.getParameter("token")));
+            response.setStatus(HttpResponse.SC_CONFLICT);
+            response.setBody(new StringBody("Machine is busy (a job is running or paused)."));
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * SCR-01: token check for the legacy camera routes, behind HttpGate.REQUIRE_TOKEN_FOR_LEGACY_CAMERA_ROUTES.
+     */
+    protected boolean ensureLegacyCameraAccess(HttpRequest request, HttpResponse response) {
+        if (!HttpGate.REQUIRE_TOKEN_FOR_LEGACY_CAMERA_ROUTES) {
+            return true;
+        }
+        if (ensureConnection(request, response)) {
+            return true;
+        }
+        Logger.w("HTTP %s refused: no approved token (UA %s)", request.getPath(), request.getHeader("User-Agent"));
+        return false;
     }
 
     protected void logResponseCostTime(HttpRequest request, long startTime) {

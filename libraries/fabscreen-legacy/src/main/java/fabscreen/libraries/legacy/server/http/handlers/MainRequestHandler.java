@@ -41,6 +41,7 @@ import fabscreen.libraries.legacy.lib.file.IFile;
 import fabscreen.libraries.legacy.lib.parser.GcodeParser;
 import fabscreen.libraries.legacy.lib.parser.IGcodeParser;
 import fabscreen.libraries.legacy.server.http.HTTPEventBus;
+import fabscreen.libraries.legacy.server.http.HttpGate;
 import io.reactivex.android.schedulers.AndroidSchedulers;
 import io.reactivex.disposables.CompositeDisposable;
 import io.reactivex.disposables.Disposable;
@@ -205,6 +206,10 @@ class MainRequestHandler extends BaseRequestHandler {
                     break;
                 case Constants.HEAD_LASER:
                 case Constants.HEAD_LASER_10W:
+                case Constants.HEAD_LASER_20W:
+                case Constants.HEAD_LASER_40W:
+                case Constants.HEAD_LASER_2W_IR:
+                    // SCR-19: 20W/40W/2W IR were missing, so status had no laser fields for them.
                     // FIXME: 2021/9/8 Laser 10w may not match this!
                     float laserFocus = getModel().getMachineController().getLaserFocus();
                     data.put("laserFocalLength", laserFocus);
@@ -633,6 +638,7 @@ class MainRequestHandler extends BaseRequestHandler {
         String line = lines[0];
 
         final CountDownLatch countDownLatch = new CountDownLatch(1);
+        final boolean[] failed = {false};
         Disposable sub = getModel().getSlaveComputer().sendGcode(line, true)
                 .subscribe(res -> {
                     String content = res.getContent();
@@ -642,13 +648,26 @@ class MainRequestHandler extends BaseRequestHandler {
                     response.setBody(new StringBody(content));
                     countDownLatch.countDown();
                 }, e -> {
-                    LogHelper.log(e);
-                    response.setStatus(StatusCode.SC_INTERNAL_SERVER_ERROR);
+                    // SCR-13: count down on error too, or the HTTP thread waits for ever.
+                    Logger.e("HTTP %s: '%s' failed: %s", URI_EXECUTE_CODE, line, e);
+                    failed[0] = true;
+                    countDownLatch.countDown();
                 });
         compositeDisposable.add(sub);
 
         try {
-            countDownLatch.await();
+            if (!countDownLatch.await(HTTP_GCODE_TIMEOUT_S, TimeUnit.SECONDS)) {
+                Logger.w("HTTP %s: no reply to '%s' within %d s", URI_EXECUTE_CODE, line, HTTP_GCODE_TIMEOUT_S);
+                sub.dispose();
+                response.setBody(new StringBody("Timed out waiting for the machine."));
+                response.setStatus(HttpResponse.SC_GATEWAY_TIMEOUT);
+                return;
+            }
+            if (failed[0]) {
+                response.setBody(new StringBody("G-code failed."));
+                response.setStatus(StatusCode.SC_INTERNAL_SERVER_ERROR);
+                return;
+            }
             if (line.startsWith("G28") || line.startsWith("G53")
                     || line.startsWith("G54")
                     || line.startsWith("G92")) {
@@ -672,8 +691,22 @@ class MainRequestHandler extends BaseRequestHandler {
                       @RequestParam(name = "file") MultipartFile file) {
         if (!ensureConnection(request, response)) return;
 
+        Logger.w("HTTP %s: file %s, %d bytes, type %s, token %s", URI_PREPARE_PRINT, file.getFilename(),
+                file.getSize(), type, HttpGate.tokenPrefix(request.getParameter("token")));
+        // SCR-04: replacing the workspace file and calling reset() during a job stopped the G-code
+        // stream with the heaters on. Refuse while a job is running or paused.
+        if (refuseIfBusy(request, response)) return;
+
         if (file.isEmpty()) {
             response.setBody(new StringBody("Empty file body"));
+            response.setStatus(HttpResponse.SC_BAD_REQUEST);
+            return;
+        }
+
+        String safeName = HttpGate.sanitizeFileName(file.getFilename());
+        if (safeName == null) {
+            Logger.w("HTTP %s refused: unsafe file name '%s'", URI_PREPARE_PRINT, file.getFilename());
+            response.setBody(new StringBody("Invalid file name."));
             response.setStatus(HttpResponse.SC_BAD_REQUEST);
             return;
         }
@@ -717,17 +750,19 @@ class MainRequestHandler extends BaseRequestHandler {
         }
 
         final CountDownLatch countDownLatch = new CountDownLatch(1);
-        File targetFile = new File(getModel().getWorkspace().getWorkspaceDir().getPath(), file.getFilename());
+        final boolean[] parsed = {false};
+        File targetFile = new File(getModel().getWorkspace().getWorkspaceDir().getPath(), safeName);
         try {
             file.transferTo(targetFile);
         } catch (IOException e) {
+            Logger.e("HTTP %s: saving %s failed: %s", URI_PREPARE_PRINT, safeName, e);
             response.setStatus(HttpResponse.SC_INTERNAL_SERVER_ERROR);
             return;
         }
         IFile iFile = new FabLocalFile(targetFile);
         getModel().getRemoteController().setFile(iFile);
         getModel().getRemoteController().setFileType(fileType);
-        getModel().getRemoteController().setFileName(file.getFilename());
+        getModel().getRemoteController().setFileName(safeName);
         // Workspace
         getModel().getWorkspace().setPrintSource(Constants.PRINT_SOURCE_LUBAN);
         getModel().getWorkspace().setRemotePrintToWorkSpace(targetFile);
@@ -748,14 +783,33 @@ class MainRequestHandler extends BaseRequestHandler {
 
                         getModel().getWorkspace().setEstimatedTime(parser.getEstimatedTime());
                         getModel().getWorkspace().setFileTotalLineCount(parser.getTotalLinesCount());
+                        parsed[0] = true;
+                        countDownLatch.countDown();
+                    } else if (progress < 0) {
+                        // GcodeParser reports a failure as -1 (SCR-08/13: this used to wait for ever)
+                        Logger.e("HTTP %s: parsing %s failed (progress %d)", URI_PREPARE_PRINT, safeName, progress);
                         countDownLatch.countDown();
                     }
+                }, e -> {
+                    Logger.e("HTTP %s: parsing %s failed: %s", URI_PREPARE_PRINT, safeName, e);
+                    countDownLatch.countDown();
                 });
         compositeDisposable.add(sub);
 
         try {
-            countDownLatch.await();
+            if (!countDownLatch.await(HTTP_PARSE_TIMEOUT_S, TimeUnit.SECONDS)) {
+                Logger.w("HTTP %s: parsing %s did not finish within %d s", URI_PREPARE_PRINT, safeName, HTTP_PARSE_TIMEOUT_S);
+                sub.dispose();
+                response.setBody(new StringBody("Timed out parsing the G-code file."));
+                response.setStatus(StatusCode.SC_GATEWAY_TIMEOUT);
+                return;
+            }
         } catch (InterruptedException e) {
+            response.setBody(new StringBody("Failed to parse G-code file."));
+            response.setStatus(StatusCode.SC_BAD_REQUEST);
+            return;
+        }
+        if (!parsed[0]) {
             response.setBody(new StringBody("Failed to parse G-code file."));
             response.setStatus(StatusCode.SC_BAD_REQUEST);
             return;
@@ -778,11 +832,22 @@ class MainRequestHandler extends BaseRequestHandler {
                     }
                     result.put("code", retCode);
                     countDownLatch.countDown();
-                }, LogHelper::log);
+                }, e -> {
+                    // SCR-13: count down on error too, or the HTTP thread waits for ever.
+                    Logger.e("HTTP %s failed: %s", request.getPath(), e);
+                    response.setStatus(HttpResponse.SC_INTERNAL_SERVER_ERROR);
+                    countDownLatch.countDown();
+                });
         compositeDisposable.add(sub);
 
         try {
-            countDownLatch.await();
+            if (!countDownLatch.await(HTTP_COMMAND_TIMEOUT_S, TimeUnit.SECONDS)) {
+                // SCR-13: never block the HTTP thread for ever.
+                Logger.w("HTTP %s: no controller reply within %d s", request.getPath(), HTTP_COMMAND_TIMEOUT_S);
+                response.setBody(new StringBody("Timed out waiting for the machine."));
+                response.setStatus(HttpResponse.SC_GATEWAY_TIMEOUT);
+                return;
+            }
             response.setBody(new JsonBody(result));
         } catch (InterruptedException e) {
             response.setBody(new StringBody("Interrupted."));
@@ -805,11 +870,22 @@ class MainRequestHandler extends BaseRequestHandler {
                     }
                     result.put("code", retCode);
                     countDownLatch.countDown();
-                }, LogHelper::log);
+                }, e -> {
+                    // SCR-13: count down on error too, or the HTTP thread waits for ever.
+                    Logger.e("HTTP %s failed: %s", request.getPath(), e);
+                    response.setStatus(HttpResponse.SC_INTERNAL_SERVER_ERROR);
+                    countDownLatch.countDown();
+                });
         compositeDisposable.add(sub);
 
         try {
-            countDownLatch.await();
+            if (!countDownLatch.await(HTTP_COMMAND_TIMEOUT_S, TimeUnit.SECONDS)) {
+                // SCR-13: never block the HTTP thread for ever.
+                Logger.w("HTTP %s: no controller reply within %d s", request.getPath(), HTTP_COMMAND_TIMEOUT_S);
+                response.setBody(new StringBody("Timed out waiting for the machine."));
+                response.setStatus(HttpResponse.SC_GATEWAY_TIMEOUT);
+                return;
+            }
             response.setBody(new JsonBody(result));
         } catch (InterruptedException e) {
             response.setBody(new StringBody("Interrupted."));
@@ -840,11 +916,22 @@ class MainRequestHandler extends BaseRequestHandler {
                     }
                     result.put("code", retCode);
                     countDownLatch.countDown();
-                }, LogHelper::log);
+                }, e -> {
+                    // SCR-13: count down on error too, or the HTTP thread waits for ever.
+                    Logger.e("HTTP %s failed: %s", request.getPath(), e);
+                    response.setStatus(HttpResponse.SC_INTERNAL_SERVER_ERROR);
+                    countDownLatch.countDown();
+                });
         compositeDisposable.add(sub);
 
         try {
-            countDownLatch.await();
+            if (!countDownLatch.await(HTTP_COMMAND_TIMEOUT_S, TimeUnit.SECONDS)) {
+                // SCR-13: never block the HTTP thread for ever.
+                Logger.w("HTTP %s: no controller reply within %d s", request.getPath(), HTTP_COMMAND_TIMEOUT_S);
+                response.setBody(new StringBody("Timed out waiting for the machine."));
+                response.setStatus(HttpResponse.SC_GATEWAY_TIMEOUT);
+                return;
+            }
             response.setBody(new JsonBody(result));
         } catch (InterruptedException e) {
             response.setBody(new StringBody("Interrupted."));
@@ -867,11 +954,22 @@ class MainRequestHandler extends BaseRequestHandler {
                     }
                     result.put("code", retCode);
                     countDownLatch.countDown();
-                }, LogHelper::log);
+                }, e -> {
+                    // SCR-13: count down on error too, or the HTTP thread waits for ever.
+                    Logger.e("HTTP %s failed: %s", request.getPath(), e);
+                    response.setStatus(HttpResponse.SC_INTERNAL_SERVER_ERROR);
+                    countDownLatch.countDown();
+                });
         compositeDisposable.add(sub);
 
         try {
-            countDownLatch.await();
+            if (!countDownLatch.await(HTTP_COMMAND_TIMEOUT_S, TimeUnit.SECONDS)) {
+                // SCR-13: never block the HTTP thread for ever.
+                Logger.w("HTTP %s: no controller reply within %d s", request.getPath(), HTTP_COMMAND_TIMEOUT_S);
+                response.setBody(new StringBody("Timed out waiting for the machine."));
+                response.setStatus(HttpResponse.SC_GATEWAY_TIMEOUT);
+                return;
+            }
             response.setBody(new JsonBody(result));
         } catch (InterruptedException e) {
             response.setBody(new StringBody("Interrupted."));
@@ -894,11 +992,22 @@ class MainRequestHandler extends BaseRequestHandler {
                         response.setStatus(HttpResponse.SC_CONFLICT);
                     }
                     countDownLatch.countDown();
+                }, e -> {
+                    // SCR-13: no error handler here used to crash the app on a serial error.
+                    Logger.e("HTTP %s failed: %s", request.getPath(), e);
+                    response.setStatus(HttpResponse.SC_INTERNAL_SERVER_ERROR);
+                    countDownLatch.countDown();
                 });
         compositeDisposable.add(subscription);
 
         try {
-            countDownLatch.await();
+            if (!countDownLatch.await(HTTP_PARSE_TIMEOUT_S, TimeUnit.SECONDS)) {
+                // SCR-13: never block the HTTP thread for ever.
+                Logger.w("HTTP %s: no controller reply within %d s", request.getPath(), HTTP_PARSE_TIMEOUT_S);
+                response.setBody(new StringBody("Timed out waiting for the machine."));
+                response.setStatus(HttpResponse.SC_GATEWAY_TIMEOUT);
+                return;
+            }
         } catch (InterruptedException e) {
             response.setBody(new StringBody("Interrupted."));
             response.setStatus(HttpResponse.SC_INTERNAL_SERVER_ERROR);
@@ -920,11 +1029,22 @@ class MainRequestHandler extends BaseRequestHandler {
                         response.setStatus(HttpResponse.SC_CONFLICT);
                     }
                     countDownLatch.countDown();
+                }, e -> {
+                    // SCR-13: no error handler here used to crash the app on a serial error.
+                    Logger.e("HTTP %s failed: %s", request.getPath(), e);
+                    response.setStatus(HttpResponse.SC_INTERNAL_SERVER_ERROR);
+                    countDownLatch.countDown();
                 });
         compositeDisposable.add(subscription);
 
         try {
-            countDownLatch.await();
+            if (!countDownLatch.await(HTTP_PARSE_TIMEOUT_S, TimeUnit.SECONDS)) {
+                // SCR-13: never block the HTTP thread for ever.
+                Logger.w("HTTP %s: no controller reply within %d s", request.getPath(), HTTP_PARSE_TIMEOUT_S);
+                response.setBody(new StringBody("Timed out waiting for the machine."));
+                response.setStatus(HttpResponse.SC_GATEWAY_TIMEOUT);
+                return;
+            }
         } catch (InterruptedException e) {
             response.setBody(new StringBody("Interrupted."));
             response.setStatus(HttpResponse.SC_INTERNAL_SERVER_ERROR);
@@ -1108,7 +1228,13 @@ class MainRequestHandler extends BaseRequestHandler {
     void overrideLaserPower(HttpRequest request, HttpResponse response) {
         if (!ensureConnection(request, response)) return;
 
-        if (!isLaser()) {
+        int headType = getModel().getMachineController().getHeadType();
+        boolean jobActive = MachinePrintJobState.isStatePrinting(getModel().getPrintController().getPrintJobState().getValue());
+        // SCR-19: during a job, every laser head accepts a power override. When idle the stock code
+        // turns the beam on ("M3 P"); keep that limited to the 1.6W/10W heads it always allowed.
+        if (jobActive ? !Constants.isLaserHead(headType) : !isLaser()) {
+            Logger.w("HTTP %s refused: head type %d (job active %b), expected a laser head",
+                    URI_OVERRIDE_LASER_POWER, headType, jobActive);
             response.setBody(new StringBody("Wrong head type."));
             response.setStatus(StatusCode.SC_CONFLICT);
             return;
@@ -1122,23 +1248,31 @@ class MainRequestHandler extends BaseRequestHandler {
         } else {
             float power = Float.valueOf(laserPower);
             CountDownLatch countDownLatch = new CountDownLatch(1);
-            if (MachinePrintJobState.isStatePrinting(getModel().getPrintController().getPrintJobState().getValue())) {
+            final boolean[] failed = {false};
+            if (jobActive) {
                 getModel().getRemoteController().overrideLaserPower(power);
                 countDownLatch.countDown();
             } else {
+                Logger.w("HTTP %s: idle, sending M3 P%.1f (head %d)", URI_OVERRIDE_LASER_POWER, power, headType);
                 Disposable sub = getModel().getSlaveComputer().sendGcode("M3 P" + power)
                         .subscribe(res -> {
                             countDownLatch.countDown();
                         }, e -> {
-                            LogHelper.log(e);
-                            response.setStatus(StatusCode.SC_INTERNAL_SERVER_ERROR);
+                            // SCR-13: count down on error too, or the HTTP thread waits for ever.
+                            Logger.e("HTTP %s: M3 failed: %s", URI_OVERRIDE_LASER_POWER, e);
+                            failed[0] = true;
+                            countDownLatch.countDown();
                         });
                 compositeDisposable.add(sub);
             }
 
             try {
-                countDownLatch.await();
-                response.setStatus(StatusCode.SC_OK);
+                if (!countDownLatch.await(HTTP_COMMAND_TIMEOUT_S, TimeUnit.SECONDS)) {
+                    Logger.w("HTTP %s: no reply to M3 within %d s", URI_OVERRIDE_LASER_POWER, HTTP_COMMAND_TIMEOUT_S);
+                    response.setStatus(StatusCode.SC_GATEWAY_TIMEOUT);
+                    return;
+                }
+                response.setStatus(failed[0] ? StatusCode.SC_INTERNAL_SERVER_ERROR : StatusCode.SC_OK);
             } catch (InterruptedException e) {
                 response.setBody(new StringBody("Interrupted."));
                 response.setStatus(HttpResponse.SC_INTERNAL_SERVER_ERROR);
@@ -1477,7 +1611,24 @@ class MainRequestHandler extends BaseRequestHandler {
     void laserMaterialThckness(HttpRequest request, HttpResponse response,
                                @RequestParam("x") float x,
                                @RequestParam("y") float y,
-                               @RequestParam("feedRate") int f) {
+                               @RequestParam("feedRate") int feedRate) {
+        // SCR-01: this route moves the machine (G53, absolute XYZ move, G54) and fires the camera.
+        // It had no token check at all; Luban's SstpHttpChannel already sends ?token=.
+        if (!ensureConnection(request, response)) {
+            Logger.w("HTTP %s refused: no approved token", URI_LASER_MATERIAL_THICKNESS);
+            return;
+        }
+        if (refuseIfBusy(request, response)) return;
+        int headType = getModel().getMachineController().getHeadType();
+        if (!Constants.isLaserHead(headType)) {
+            Logger.w("HTTP %s refused: head type %d is not a laser", URI_LASER_MATERIAL_THICKNESS, headType);
+            response.setStatus(HttpResponse.SC_CONFLICT);
+            response.setBody(new StringBody("Wrong head type."));
+            return;
+        }
+        final int f = HttpGate.clampFeedRate(feedRate);
+        Logger.w("HTTP %s: move to x %.1f y %.1f F%d (asked F%d), head %d, token %s", URI_LASER_MATERIAL_THICKNESS,
+                x, y, f, feedRate, headType, HttpGate.tokenPrefix(request.getParameter("token")));
         JSONObject json = new JSONObject();
         final CountDownLatch countDownLatch = new CountDownLatch(1);
         //Measure height.
@@ -1510,15 +1661,25 @@ class MainRequestHandler extends BaseRequestHandler {
                     json.put("thickness", thickness);
                     countDownLatch.countDown();
                 }, e -> {
-                    Disposable sub = getModel().getSlaveComputer().setAFAssistLightState(0).subscribe();
+                    Disposable sub = getModel().getSlaveComputer().setAFAssistLightState(0).subscribe(ok -> { }, LogHelper::log);
                     sub.dispose();
-                    e.printStackTrace();
+                    Logger.e("HTTP %s failed: %s", URI_LASER_MATERIAL_THICKNESS, e);
                     json.put("status", false);
                     countDownLatch.countDown();
                 });
         compositeDisposable.add(subscription);
         try {
-            countDownLatch.await();
+            if (!countDownLatch.await(HTTP_COMMAND_TIMEOUT_S * 2, TimeUnit.SECONDS)) {
+                // SCR-13: never block the HTTP thread for ever.
+                Logger.w("HTTP %s: no result within %d s", URI_LASER_MATERIAL_THICKNESS, HTTP_COMMAND_TIMEOUT_S * 2);
+                subscription.dispose();
+                try {
+                    json.put("status", false);
+                } catch (JSONException ignored) {
+                    // body stays as is
+                }
+                response.setStatus(StatusCode.SC_GATEWAY_TIMEOUT);
+            }
             final ResponseBody body = new JsonBody(json);
             response.setBody(body);
         } catch (InterruptedException e) {

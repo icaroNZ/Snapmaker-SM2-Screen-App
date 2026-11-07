@@ -26,8 +26,10 @@ import java.io.UnsupportedEncodingException;
 import java.net.URLDecoder;
 import java.util.Locale;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import fabscreen.libraries.legacy.BaseApplication;
+import fabscreen.libraries.legacy.server.http.HttpGate;
 import fabscreen.libraries.legacy.data.Constants;
 import fabscreen.libraries.legacy.data.Model;
 import fabscreen.libraries.legacy.lib.FileHelper;
@@ -137,6 +139,9 @@ public class CameraRequestHandler extends BaseRequestHandler {
 
     @PostMapping(path = URI_CAMERA_SET_CALIBRATION_MATRIX)
     void setCameraCalibrationMatrix(HttpRequest request, HttpResponse response, @RequestParam("matrix") String matrix) {
+        // SCR-01: overwrote the stored camera calibration with no token at all.
+        if (!ensureLegacyCameraAccess(request, response)) return;
+        Logger.w("HTTP %s: camera calibration matrix replaced (%d chars)", request.getPath(), matrix == null ? 0 : matrix.length());
 
         Model model = BaseApplication.getInstance().getModel();
         try {
@@ -156,6 +161,9 @@ public class CameraRequestHandler extends BaseRequestHandler {
 
     @PostMapping(path = URI_10W_LASER_CAMERA_SET_CALIBRATION_MATRIX)
     void set10WLaserCameraCalibrationMatrix(HttpRequest request, HttpResponse response, @RequestParam("matrix") String matrix) {
+        // SCR-01: overwrote the stored camera calibration with no token at all.
+        if (!ensureLegacyCameraAccess(request, response)) return;
+        Logger.w("HTTP %s: camera calibration matrix replaced (%d chars)", request.getPath(), matrix == null ? 0 : matrix.length());
 
         Model model = BaseApplication.getInstance().getModel();
         try {
@@ -208,10 +216,16 @@ public class CameraRequestHandler extends BaseRequestHandler {
     @GetMapping(URI_CAPTURE_PHOTO)
     void capture(HttpRequest request, HttpResponse response,
                  @RequestParam("index") int index, @RequestParam("x") float x, @RequestParam("y") float y,
-                 @RequestParam("z") float z, @RequestParam("feedRate") int f, @RequestParam(name = "photoQuality", required = false, defaultValue = "-1") int quality) {
+                 @RequestParam("z") float z, @RequestParam("feedRate") int feedRate, @RequestParam(name = "photoQuality", required = false, defaultValue = "-1") int quality) {
+        // SCR-01: this GET moves the machine to an absolute XYZ position. It had no token, busy
+        // or feed-rate check, and any web page could trigger it.
+        if (!ensureLegacyCameraAccess(request, response)) return;
+        if (refuseIfBusy(request, response)) return;
+        final int f = HttpGate.clampFeedRate(feedRate);
 
         Model model = BaseApplication.getInstance().getModel();
-        Logger.i(String.format(Locale.getDefault(), "capture photo index %d x %.2f y %.2f z %.2f f %d", index, x, y, z, f));
+        Logger.w(String.format(Locale.US, "capture photo index %d x %.2f y %.2f z %.2f f %d (asked %d), head %d",
+                index, x, y, z, f, feedRate, model.getMachineController().getHeadType()));
         JSONObject json = new JSONObject();
         if (model.getLaserCameraController().isConnected()) {
 
@@ -263,17 +277,23 @@ public class CameraRequestHandler extends BaseRequestHandler {
 
                         countDownLatch.countDown();
                     }, e -> {
-                        e.printStackTrace();
+                        // SCR-13: count down on error too, or the HTTP thread waits for ever.
+                        Logger.e("HTTP capture photo %d failed: %s", index, e);
                         json.put("status", false);
+                        countDownLatch.countDown();
                     });
             disposables.add(subscription);
 
             try {
-                countDownLatch.await();
+                if (!countDownLatch.await(HTTP_COMMAND_TIMEOUT_S * 2, TimeUnit.SECONDS)) {
+                    Logger.w("HTTP capture photo %d: no photo within %d s", index, HTTP_COMMAND_TIMEOUT_S * 2);
+                    subscription.dispose();
+                    json.put("status", false);
+                }
 
                 final ResponseBody body = new JsonBody(json);
                 response.setBody(body);
-            } catch (InterruptedException e) {
+            } catch (InterruptedException | JSONException e) {
                 try {
                     json.put("status", false);
                     final ResponseBody body = new JsonBody(json);

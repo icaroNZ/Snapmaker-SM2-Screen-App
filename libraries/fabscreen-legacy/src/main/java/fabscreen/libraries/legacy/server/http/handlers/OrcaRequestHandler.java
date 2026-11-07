@@ -43,6 +43,8 @@ import fabscreen.libraries.legacy.lib.parser.GcodeParser;
 import fabscreen.libraries.legacy.lib.parser.IGcodeParser;
 import fabscreen.libraries.legacy.route.RoutePath;
 import fabscreen.libraries.legacy.server.http.HTTPEventBus;
+import fabscreen.libraries.legacy.server.http.HttpGate;
+import fabscreen.libraries.legacy.data.remote.SessionManager;
 import fabscreen.libraries.legacy.view.FabConfirm;
 import io.reactivex.Observable;
 import io.reactivex.android.schedulers.AndroidSchedulers;
@@ -62,6 +64,18 @@ class OrcaRequestHandler extends BaseRequestHandler {
     void uploadFile(HttpRequest request, HttpResponse response,
                     @RequestParam(name = "file") MultipartFile file) {
         String isNeedPrint = request.getParameter("print");
+        Logger.w("HTTP %s: name '%s', %d bytes, print=%s, head %d, job state %d, UA %s", URI_LOCAL_FILE,
+                file.getFilename(), file.getSize(), isNeedPrint, getModel().getMachineController().getHeadType(),
+                getModel().getPrintController().getPrintJobState().getValue(), request.getHeader("User-Agent"));
+
+        // SCR-08: optional token (?token= or OctoPrint's X-Api-Key), see HttpGate.REQUIRE_TOKEN_FOR_OCTOPRINT_UPLOAD.
+        if (HttpGate.REQUIRE_TOKEN_FOR_OCTOPRINT_UPLOAD && !hasApprovedToken(request)) {
+            Logger.w("HTTP %s refused (401): no approved token / X-Api-Key", URI_LOCAL_FILE);
+            response.setStatus(HttpResponse.SC_UNAUTHORIZED);
+            response.setBody(new StringBody("Approved token required (?token= or X-Api-Key)."));
+            return;
+        }
+
         if (isNeedPrint == null) {
             Logger.w("parameter \"print\" not found");
             response.setStatus(HttpResponse.SC_BAD_REQUEST);
@@ -69,7 +83,7 @@ class OrcaRequestHandler extends BaseRequestHandler {
             return;
         }
         if (isMachineStatePrinting() && isNeedPrint.equals("true")) {
-            Logger.w("Machine is not in idle status");
+            Logger.w("HTTP %s refused (503): machine is not idle", URI_LOCAL_FILE);
             response.setStatus(HttpResponse.SC_SERVICE_UNAVAILABLE);
             response.setBody(new StringBody("Machine is not in idle status"));
             return;
@@ -96,7 +110,16 @@ class OrcaRequestHandler extends BaseRequestHandler {
             return;
         }
 
-        File targetFile = new File(getModel().getFilesDir(), file.getFilename());
+        // SCR-08: the client-chosen name went straight into new File(filesDir, name).
+        String safeName = HttpGate.sanitizeFileName(file.getFilename());
+        if (safeName == null) {
+            Logger.w("HTTP %s refused: unsafe file name '%s'", URI_LOCAL_FILE, file.getFilename());
+            response.setBody(new StringBody("Invalid file name"));
+            response.setStatus(HttpResponse.SC_BAD_REQUEST);
+            return;
+        }
+
+        File targetFile = new File(getModel().getFilesDir(), safeName);
         try {
             file.transferTo(targetFile);
             HTTPEventBus.getInstance().onReceiveFile(targetFile);
@@ -112,7 +135,8 @@ class OrcaRequestHandler extends BaseRequestHandler {
         CountDownLatch countDownLatch = new CountDownLatch(1);
         if (isNeedPrint.equals("true") && getModel().getMachineController().getWorkType() == MachineController.WorkType.FDM) {
             if (getModel().getRemoteController().getRemotePageFlag()) {
-                Logger.d("disconnect remote connection for staring print via upload...");
+                Logger.w("HTTP %s: evicting the current remote session (token %s) to start the upload print",
+                        URI_LOCAL_FILE, HttpGate.tokenPrefix(getModel().getRemoteController().getCurrentSession().getToken()));
                 getModel().getRemoteController().setCurrentSession(NULL_SESSION);
             }
             getModel().getRemoteController().connectPrintController();
@@ -123,16 +147,19 @@ class OrcaRequestHandler extends BaseRequestHandler {
                     return Observable.just(false);
                 }
             }).subscribe(success -> {
-                AndroidSchedulers.mainThread().scheduleDirect(this::gotoPrintSilently, 1000, TimeUnit.MILLISECONDS);
-
                 if (success) {
+                    // SCR-08: only jump to the print page when the job really started.
+                    AndroidSchedulers.mainThread().scheduleDirect(this::gotoPrintSilently, 1000, TimeUnit.MILLISECONDS);
+                    Logger.i("HTTP %s: print of %s started", URI_LOCAL_FILE, safeName);
                     response.setStatus(StatusCode.SC_OK);
                 } else {
+                    Logger.e("HTTP %s: prepare/start of %s failed", URI_LOCAL_FILE, safeName);
                     response.setBody(new StringBody("Prepare and start print failed, if problem persist, please restart machine and try again."));
                     response.setStatus(StatusCode.SC_SERVICE_UNAVAILABLE);
                 }
                 countDownLatch.countDown();
             }, e -> {
+                Logger.e("HTTP %s: prepare/start of %s failed: %s", URI_LOCAL_FILE, safeName, e);
                 response.setStatus(HttpResponse.SC_INTERNAL_SERVER_ERROR);
                 countDownLatch.countDown();
             });
@@ -143,11 +170,32 @@ class OrcaRequestHandler extends BaseRequestHandler {
         }
 
         try {
-            countDownLatch.await();
+            if (!countDownLatch.await(HTTP_PARSE_TIMEOUT_S + HTTP_COMMAND_TIMEOUT_S, TimeUnit.SECONDS)) {
+                Logger.w("HTTP %s: prepare/start of %s did not finish in time", URI_LOCAL_FILE, safeName);
+                response.setBody(new StringBody("Timed out preparing the print."));
+                response.setStatus(HttpResponse.SC_GATEWAY_TIMEOUT);
+            }
         } catch (InterruptedException e) {
             response.setBody(new StringBody("Interrupted."));
             response.setStatus(HttpResponse.SC_INTERNAL_SERVER_ERROR);
         }
+    }
+
+    /** Approved current-session token in ?token= or the OctoPrint X-Api-Key header (SCR-08). */
+    private boolean hasApprovedToken(HttpRequest request) {
+        String token = request.getParameter("token");
+        if (token == null) {
+            token = request.getHeader("X-Api-Key");
+        }
+        if (token == null) {
+            return false;
+        }
+        SessionManager.Session current = getModel().getRemoteController().getCurrentSession();
+        if (current != NULL_SESSION && token.equals(current.getToken()) && current.isGranted()) {
+            getModel().getRemoteController().accessCurrentSession();
+            return true;
+        }
+        return false;
     }
 
     private void gotoPrintSilently() {
@@ -316,6 +364,7 @@ class OrcaRequestHandler extends BaseRequestHandler {
         }
 
         final CountDownLatch countDownLatch = new CountDownLatch(1);
+        final boolean[] parsed = {false};
         IFile iFile = new FabLocalFile(file);
         getModel().getRemoteController().setFile(iFile);
         getModel().getRemoteController().setFileType(fileType);
@@ -340,6 +389,11 @@ class OrcaRequestHandler extends BaseRequestHandler {
 
                         getModel().getWorkspace().setEstimatedTime(parser.getEstimatedTime());
                         getModel().getWorkspace().setFileTotalLineCount(parser.getTotalLinesCount());
+                        parsed[0] = true;
+                        countDownLatch.countDown();
+                    } else if (progress < 0) {
+                        // SCR-08: GcodeParser reports failure as -1; this used to wait for ever.
+                        Logger.e("Prepare print failed, parser reported %d for %s", progress, file.getName());
                         countDownLatch.countDown();
                     }
                 }, e -> {
@@ -349,8 +403,13 @@ class OrcaRequestHandler extends BaseRequestHandler {
         mDisposable.add(sub);
 
         try {
-            countDownLatch.await();
-            return Observable.just(true);
+            if (!countDownLatch.await(HTTP_PARSE_TIMEOUT_S, TimeUnit.SECONDS)) {
+                Logger.w("Prepare print failed, parsing %s took more than %d s", file.getName(), HTTP_PARSE_TIMEOUT_S);
+                sub.dispose();
+                return Observable.just(false);
+            }
+            // SCR-08: a parse failure used to return true and start the job anyway.
+            return Observable.just(parsed[0]);
         } catch (InterruptedException e) {
             return Observable.just(false);
         }
@@ -419,10 +478,14 @@ class OrcaRequestHandler extends BaseRequestHandler {
         return curVersion;
     }
 
+    /**
+     * SCR-04: busy when the controller reports a job OR the screen's job is active. The old test
+     * needed both (&&), so a USB-host job (status 3 with an idle screen job) or a screen job with a
+     * stale controller status let an upload with print=true replace the running job.
+     */
     public boolean isMachineStatePrinting() {
         int machinePrintStatus = getModel().getMachineController().getMachineStatus().printerStatus;
-        final boolean isMachineStatusPrinting = machinePrintStatus == 3 || machinePrintStatus == 4;
-        final boolean isPrintJobStatePrinting = MachinePrintJobState.isStatePrinting(getModel().getPrintController().getPrintJobState().getValue());
-        return isMachineStatusPrinting && isPrintJobStatePrinting;
+        int jobState = getModel().getPrintController().getPrintJobState().getValue();
+        return HttpGate.isBusy(machinePrintStatus, jobState);
     }
 }
