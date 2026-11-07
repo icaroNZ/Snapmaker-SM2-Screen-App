@@ -130,6 +130,13 @@ public class BatchPrintController implements IPrintController {
 
     @Override
     public void reset() {
+        // SCR-04: reset() stops the G-code stream; log it when a job is live (who called it).
+        MachinePrintJobState jobState = mMachinePrintStateSubject.getValue();
+        if (jobState != null && MachinePrintJobState.isStatePrinting(jobState.getValue())) {
+            StackTraceElement[] trace = new Throwable().getStackTrace();
+            Logger.w("Print reset() while the job is %s (called from %s)", jobState,
+                    trace.length > 1 ? trace[1] : "?");
+        }
         mDeprecatedPrintStateSubject.onNext(STATE_IDLE);
 
         mGcodeModifier.reset();
