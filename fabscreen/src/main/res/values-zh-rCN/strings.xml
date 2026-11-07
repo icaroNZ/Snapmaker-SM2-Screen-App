@@ -1023,4 +1023,23 @@
     <string name="calibration_dialog_leveling_start_fail_desc">Leveling could not start. The bed heating or soak was stopped, or the toolhead is not ready. Please retry or quit.</string>
     <string name="calibration_dialog_heat_soak_leveling_fail_desc">Leveling failed. The bed heating or soak was stopped (bed fault or emergency stop), or probing failed. Please retry or quit.</string>
 
+    <!-- Separate bed mesh / Z-offset calibration (A250T fork, controller 5.2.1-a250t.4+; English in every locale until translated) -->
+    <string name="calibration_entry_measure_mesh">Measure bed mesh</string>
+    <string name="calibration_entry_calibrate_zoffset">Calibrate Z offset</string>
+    <string name="calibration_zoffset_status_valid">Z offset: %1$s mm (calibrated). Measuring the bed mesh applies it, no card step.</string>
+    <string name="calibration_zoffset_status_not_set">Z offset: not calibrated. Calibrate it once, or measure the bed mesh with the card step.</string>
+    <string name="calibration_zoffset_status_out_of_range">Z offset: %1$s mm is out of range. Please calibrate the Z offset again.</string>
+    <string name="calibration_zoffset_status_other_toolhead">Z offset: calibrated with another toolhead. Please calibrate the Z offset again.</string>
+    <string name="calibration_zoffset_title">Calibrate Z Offset</string>
+    <string name="calibration_zoffset_probing">Probing the bed centre…</string>
+    <string name="calibration_dialog_mesh_offset_applied">Bed mesh measured and saved. The stored Z offset (%1$s mm) was applied.</string>
+    <string name="calibration_dialog_zoffset_not_set_card_step">Z offset not calibrated. Lower the nozzle onto the card now. Save also stores the Z offset, so later mesh measurements skip this step.</string>
+    <string name="calibration_dialog_zoffset_out_of_range_card_step">The stored Z offset (%1$s mm) is out of range. Lower the nozzle onto the card now. Save stores a new Z offset.</string>
+    <string name="calibration_dialog_zoffset_other_toolhead_card_step">The stored Z offset was calibrated with another toolhead. Lower the nozzle onto the card now. Save stores a new Z offset.</string>
+    <string name="calibration_dialog_zoffset_saved">Z offset saved: %1$s mm. It is applied automatically every time the bed mesh is measured.</string>
+    <string name="calibration_dialog_zoffset_saved_no_value">Z offset saved. It is applied automatically every time the bed mesh is measured.</string>
+    <string name="calibration_dialog_zoffset_not_stored">The Z offset was not stored (out of range, or the nozzle is not over the bed centre). Please retry or quit.</string>
+    <string name="calibration_dialog_zoffset_fail_desc">Z offset calibration failed. The bed heating or soak was stopped, the toolhead is not ready, or probing failed. Please retry or quit.</string>
+    <string name="calibration_exit_zoffset_confirm_desc">Exit the Z offset calibration? The stored Z offset does not change.</string>
+
 </resources>
