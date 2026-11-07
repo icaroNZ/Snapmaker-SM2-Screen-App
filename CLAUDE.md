@@ -18,7 +18,7 @@ and **UDP discovery on 20054** that Luban, Snapmaker Orca and the Cura plugin us
 - `a250t/main` = upstream `main` (one squashed commit `b9c4764`, app `V1.19.3`) + this file. No code changes.
 - No licence ("TBD"). CI: `.github/workflows/a250t-build.yml` (ours, ubuntu-22.04, JDK 8, NDK 22.1.7171670; runs
   `assembleDebug` + `test`, uploads the debug APKs; CI-only `.github/ci/repos.init.gradle` puts google()/mavenCentral()
-  before the Aliyun mirrors). As of 07/11/2026 it has NOT run yet (no GitHub fork to run it on). One real JVM test class, `fabscreen/src/test/java/com/snapmaker/fabscreen/FabPacketTest.java`
+  before the Aliyun mirrors). It passed on icaroNZ/Snapmaker-SM2-Screen-App run 42321848947 (07/11/2026): assembleDebug OK, 16/16 unit tests; APK artifact `fabscreen-debug-apks` (debug-signed, do not install on the real screen). One real JVM test class, `fabscreen/src/test/java/com/snapmaker/fabscreen/FabPacketTest.java`
   (frame round-trip, checksum vectors, stream reader); the other test files are Android Studio placeholders.
 
 ### Tech stack
