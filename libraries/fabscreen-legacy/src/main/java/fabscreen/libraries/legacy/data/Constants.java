@@ -25,6 +25,20 @@ public class Constants {
     public static final int HEAD_CNC_200W = 8;
     public static final int HEAD_LASER_2W_IR = 9;
 
+    /** Every laser tool head: 1.6W, 10W, 20W, 40W and 2W IR (SCR-19). */
+    public static boolean isLaserHead(int headType) {
+        switch (headType) {
+            case HEAD_LASER:
+            case HEAD_LASER_10W:
+            case HEAD_LASER_20W:
+            case HEAD_LASER_40W:
+            case HEAD_LASER_2W_IR:
+                return true;
+            default:
+                return false;
+        }
+    }
+
     // special tool head for factory and testing
     public static final int HEAD_FACTORY_3DP = 0x97;
     public static final int HEAD_FACTORY_CNC = 0x98;
