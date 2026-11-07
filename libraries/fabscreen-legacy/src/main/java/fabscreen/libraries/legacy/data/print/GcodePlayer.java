@@ -124,7 +124,14 @@ public class GcodePlayer implements BatchAssembler.LineSource {
 
             pos++;
         }
-        Logger.i(String.format("set line number takes %s ms", SystemClock.elapsedRealtime() - startTime));
+        long took = SystemClock.elapsedRealtime() - startTime;
+        if (took > 1000) {
+            // SCR-17: this re-scan runs on the main thread; long ones risk an ANR.
+            Logger.w("set line number %d of %s takes %d ms (file %d bytes)", startLineno,
+                    mFile == null ? "null" : mFile.getName(), took, mFile == null ? 0 : mFile.length());
+        } else {
+            Logger.i(String.format("set line number takes %s ms", took));
+        }
     }
 
     void setTotalCount(int totalCount) {

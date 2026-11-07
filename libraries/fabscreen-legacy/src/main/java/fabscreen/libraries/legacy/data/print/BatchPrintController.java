@@ -21,7 +21,11 @@ public class BatchPrintController implements IPrintController {
 
     // Batch
     private BatchCode[] mBatches;
-    private final int BATCHES_NUMS = 3;
+    // SCR-17 (part): keep 9 batches. The controller buffers up to 8 packs
+    // (Snapmaker2-Controller hmi_gcode_pack_buffer), so after a pause/resume it can ask again for a
+    // line older than the last 3 batches; that line then had to be re-read from the file (a full
+    // re-scan from line 0 on the main thread) or, before SCR-03, was answered with an empty batch.
+    private final int BATCHES_NUMS = 9;
     // BATCHES_LENGTH = Maximum packet length - EventID - StartLine -EndLine
     private final int BATCHES_LENGTH = 512 - 1 - 4 - 4;
 
