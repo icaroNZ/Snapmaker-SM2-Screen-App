@@ -343,6 +343,24 @@ public class OnAirGcodeModifier {
     }
 
     public String newOverride(String line) {
+        return initialOverride(line, true);
+    }
+
+    /**
+     * Rewritten form of {@code line} for the initial temperature override, without consuming the
+     * one-shot marker (SCR-15: the marker used to be set before the batch fit check, so a rewritten
+     * line that did not fit was lost and the next batch sent the original temperature).
+     */
+    public String peekInitialOverride(String line) {
+        return initialOverride(line, false);
+    }
+
+    /** Same as {@link #peekInitialOverride} but consumes the marker; call once the line is sent. */
+    public String commitInitialOverride(String line) {
+        return initialOverride(line, true);
+    }
+
+    private String initialOverride(String line, boolean commit) {
         // Parse line to separate arguments
         final int length = line.length();
 
@@ -364,6 +382,7 @@ public class OnAirGcodeModifier {
                 pos++;
             }
 
+            if (lineArgCount == lineArgs.length) break;
             lineArgs[lineArgCount++] = line.substring(start, pos);
         }
 
@@ -372,40 +391,36 @@ public class OnAirGcodeModifier {
         switch (lineArgs[0]) {
             case "M104": {
                 if (!mInitialM104Marker) {
-                    mInitialM104Marker = true;
+                    if (commit) mInitialM104Marker = true;
                     if (mOverrideInitialNozzleTemperature != -1) {
-                        Logger.d("Override M104 S" + mOverrideInitialNozzleTemperature);
-                        return lineArgs[0] + " S" + mOverrideInitialNozzleTemperature;
+                        return replaceTemperatureArg(lineArgs, lineArgCount, mOverrideInitialNozzleTemperature);
                     }
                 }
                 break;
             }
             case "M109": {
                 if (!mInitialM109Marker) {
-                    mInitialM109Marker = true;
+                    if (commit) mInitialM109Marker = true;
                     if (mOverrideInitialNozzleTemperature != -1) {
-                        Logger.d("Override M109 S" + mOverrideInitialNozzleTemperature);
-                        return lineArgs[0] + " S" + mOverrideInitialNozzleTemperature;
+                        return replaceTemperatureArg(lineArgs, lineArgCount, mOverrideInitialNozzleTemperature);
                     }
                 }
                 break;
             }
             case "M140": {
                 if (!mInitialM140Marker) {
-                    mInitialM140Marker = true;
+                    if (commit) mInitialM140Marker = true;
                     if (mOverrideInitialHeatedBedTemperature != -1) {
-                        Logger.d("Override M140 S" + mOverrideInitialHeatedBedTemperature);
-                        return lineArgs[0] + " S" + mOverrideInitialHeatedBedTemperature;
+                        return replaceTemperatureArg(lineArgs, lineArgCount, mOverrideInitialHeatedBedTemperature);
                     }
                 }
                 break;
             }
             case "M190": {
                 if (!mInitialM190Marker) {
-                    mInitialM190Marker = true;
+                    if (commit) mInitialM190Marker = true;
                     if (mOverrideInitialHeatedBedTemperature != -1) {
-                        Logger.d("Override M190 S" + mOverrideInitialHeatedBedTemperature);
-                        return lineArgs[0] + " S" + mOverrideInitialHeatedBedTemperature;
+                        return replaceTemperatureArg(lineArgs, lineArgCount, mOverrideInitialHeatedBedTemperature);
                     }
                 }
                 break;
@@ -414,5 +429,31 @@ public class OnAirGcodeModifier {
 
         // unmodified
         return line;
+    }
+
+    /**
+     * Rebuild a temperature command with a new target, keeping every other argument (SCR-15: the
+     * old code returned {@code "<cmd> S<t>"} and dropped T, C, W and turned {@code M190 R} into
+     * {@code M190 S}, which changes its meaning). The first S or R argument gets the new value;
+     * if there is none, {@code S<t>} is appended. Comments are dropped (the batch strips them anyway).
+     */
+    static String replaceTemperatureArg(String[] args, int count, float temperature) {
+        StringBuilder sb = new StringBuilder(args[0]);
+        boolean replaced = false;
+        for (int i = 1; i < count; i++) {
+            String arg = args[i];
+            sb.append(' ');
+            char letter = arg.isEmpty() ? 0 : Character.toUpperCase(arg.charAt(0));
+            if (!replaced && (letter == 'S' || letter == 'R')) {
+                sb.append(arg.charAt(0)).append(temperature);
+                replaced = true;
+            } else {
+                sb.append(arg);
+            }
+        }
+        if (!replaced) {
+            sb.append(" S").append(temperature);
+        }
+        return sb.toString();
     }
 }
