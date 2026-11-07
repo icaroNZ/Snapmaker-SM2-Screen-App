@@ -30,6 +30,10 @@ public class BatchPrintController implements IPrintController {
     private int mNowBatchNo;
     private BatchCode mBatchCode;
 
+    // Resend-loop detection (diagnostics only).
+    private int mLastRequestedLineNo = -1;
+    private int mSameLineRequests = 0;
+
     private boolean mRecoveryFlag = false;
     private boolean mNeedOverrideInitialTemperature = false;
 
@@ -388,15 +392,35 @@ public class BatchPrintController implements IPrintController {
         if (mDeprecatedPrintStateSubject.getValue() != STATE_PRINTING) {
             return;
         }
+            // A resend loop (the controller asking for the same line again and again) means it rejects
+            // what we send; report it, at most once per repeat burst.
+            if (lineNo == mLastRequestedLineNo) {
+                mSameLineRequests++;
+                if (mSameLineRequests == 4) {
+                    Logger.e("Batch: controller requested line %d %d times in a row (resend loop?)", lineNo, mSameLineRequests);
+                }
+            } else {
+                mLastRequestedLineNo = lineNo;
+                mSameLineRequests = 1;
+            }
 
+            doNextBatch(lineNo);
+        } catch (RuntimeException e) {
+            // SCR-07: an exception used to dispose the batch-request subscription silently, so the
+            // controller waited for G-code for ever with the heaters on. Log and pause instead.
+            Logger.e("Batch: building the batch from line %d failed: %s", lineNo, e);
+            LogHelper.log(e);
+            pauseOnStreamError("internal error at line " + lineNo);
+        }
+    }
+
+    private void doNextBatch(int lineNo) {
         mBatchCode = new BatchCode("", lineNo, lineNo);
-        StringBuffer linesBuffer = new StringBuffer();
-        int batchLength = 0;
 
         if (lineNo < mStartBatchNo) {
             Logger.d("Abnormal: LineNo %s < mStartBatchNo %s,mEndBatchNo:%s", lineNo, mStartBatchNo, mEndBatchNo);
             clearBatch();
-            doNext(lineNo);
+            doNextBatch(lineNo);
             return;
         }
 
@@ -407,47 +431,40 @@ public class BatchPrintController implements IPrintController {
                 mGcodePlayer.nextLine();
             }
 
-            while (mGcodePlayer.getLineNo() < lineNo) {
+            while (mGcodePlayer.getLineNo() < lineNo && !mGcodePlayer.hasReadError()) {
                 mGcodePlayer.nextLine();
             }
-            // Failed to obtain G-code, complete the task
-            if (mGcodePlayer.getLine() == null) {
-                send();
-                return;
+
+            BatchAssembler.LineRewriter rewriter = null;
+            if (mNeedOverrideInitialTemperature && !mGcodeModifier.IsAllInitialCodeOverride()) {
+                rewriter = mInitialTemperatureRewriter;
             }
+            BatchAssembler.Result result = BatchAssembler.assemble(mGcodePlayer, lineNo,
+                    BatchAssembler.MAX_PAYLOAD_BYTES, rewriter);
 
-
-            while (batchLength < BATCHES_LENGTH) {
-                String line = mGcodePlayer.getLine();
-                if (mGcodePlayer.getLine() == null) {
-                    // Failed to obtain G-code, complete the task, break
+            switch (result.status) {
+                case READ_ERROR:
+                    Logger.e("Batch: G-code read failed before line %d, not sending (no early end of file)", lineNo);
+                    // Forget the kept batches so the next request (after Resume) reopens the file.
+                    clearBatch();
+                    pauseOnStreamError("file read failed at line " + lineNo + ", check the USB stick / file");
+                    return;
+                case LINE_TOO_LONG:
+                    Logger.e("Batch: line %d is %d bytes, exceeds the batch limit of %d", lineNo,
+                            result.rejectedLineBytes, BatchAssembler.MAX_PAYLOAD_BYTES);
+                    pauseOnStreamError("line " + lineNo + " is too long");
+                    return;
+                case END_OF_FILE:
+                    Logger.i("Batch: sending end-of-file batch at line %d of %d", lineNo, mGcodePlayer.getTotalCount());
+                    send();
+                    return;
+                default:
                     break;
-                }
-
-                // Rewrite the requirements only once
-                if (mNeedOverrideInitialTemperature && !mGcodeModifier.IsAllInitialCodeOverride()) {
-                    line = mGcodeModifier.newOverride(line);
-                    // Override flag will reset if all initial temperature G-code was override.
-                    mNeedOverrideInitialTemperature = !mGcodeModifier.IsAllInitialCodeOverride();
-                }
-
-                // Replace comments in G-code code
-                int index = line.indexOf(";");
-                if (index != -1) {
-                    line = line.substring(0, index + 1);
-                }
-                line += "\n";
-                batchLength += line.getBytes().length;
-                if (batchLength < BATCHES_LENGTH) {
-                    linesBuffer.append(line);
-                    mGcodePlayer.nextLine();
-                }
             }
 
-            String tempBatch = linesBuffer.toString();
             mNowBatchNo = lineNo;
-            mEndBatchNo = mGcodePlayer.getLineNo() - 1;
-            mBatchCode = new BatchCode(tempBatch, mNowBatchNo, mEndBatchNo);
+            mEndBatchNo = result.endLine;
+            mBatchCode = new BatchCode(result.payload, mNowBatchNo, mEndBatchNo);
             int batchIndex = (getBatch(lineNo - 1) + 1) % BATCHES_NUMS;
             mBatches[batchIndex] = mBatchCode;
         } else {
@@ -455,20 +472,56 @@ public class BatchPrintController implements IPrintController {
             int batchIndex = getBatch(lineNo);
             // Failed to find the required batch
             if (batchIndex == -1) {
-                Logger.d("Error: Batch can't find :" + lineNo);
-                send();
+                // An empty payload would end the job: rebuild from the file instead (SCR-03/10).
+                Logger.w("Batch: line %d not in any kept batch (%d..%d), re-reading the file", lineNo, mStartBatchNo, mEndBatchNo);
+                clearBatch();
+                doNextBatch(lineNo);
                 return;
             }
             BatchCode tempBatch = mBatches[batchIndex];
-            String[] tempGcodes = tempBatch.getGcodes().split("\n");
-            for (int i = lineNo - tempBatch.getStartNo(); i < tempGcodes.length; i++) {
-                linesBuffer.append(tempGcodes[i]).append("\n");
+            String payload = BatchAssembler.resendPayload(tempBatch.getGcodes(), tempBatch.getStartNo(), lineNo);
+            int expected = tempBatch.getEndNo() - lineNo + 1;
+            int actual = BatchAssembler.countLines(payload);
+            Logger.w("Batch: resend from %d (stored %d..%d, %d lines rebuilt)", lineNo,
+                    tempBatch.getStartNo(), tempBatch.getEndNo(), actual);
+            if (actual != expected || payload.isEmpty()) {
+                Logger.e("Batch: rebuilt resend has %d lines, expected %d; re-reading the file", actual, expected);
+                clearBatch();
+                doNextBatch(lineNo);
+                return;
             }
-            mBatchCode = new BatchCode(linesBuffer.toString(), lineNo, tempBatch.getEndNo());
+            mBatchCode = new BatchCode(payload, lineNo, tempBatch.getEndNo());
             mBatches[batchIndex] = mBatchCode;
         }
         send();
     }
+
+    /**
+     * SCR-07/SCR-10: the next batch cannot be built (file read error, over-long line). Sending
+     * nothing would leave the controller waiting with the heaters on; sending an empty payload
+     * would finish the job early. Pause instead so the user sees the job stopped.
+     */
+    private void pauseOnStreamError(String reason) {
+        Logger.e("Batch: pausing the job: %s", reason);
+        pause();
+    }
+
+    private final BatchAssembler.LineRewriter mInitialTemperatureRewriter = new BatchAssembler.LineRewriter() {
+        @Override
+        public String peek(String line) {
+            return mGcodeModifier.peekInitialOverride(line);
+        }
+
+        @Override
+        public void commit(String line) {
+            String rewritten = mGcodeModifier.commitInitialOverride(line);
+            if (!rewritten.isEmpty() && !rewritten.equals(line)) {
+                Logger.i("Initial override: '%s' -> '%s'", line, rewritten);
+            }
+            // Override flag resets once all initial temperature G-codes were overridden.
+            mNeedOverrideInitialTemperature = !mGcodeModifier.IsAllInitialCodeOverride();
+        }
+    };
 
     private void clearBatch() {
         mBatches = new BatchCode[BATCHES_NUMS];

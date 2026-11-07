@@ -8,6 +8,7 @@ import com.orhanobut.logger.Logger;
 import java.io.IOException;
 
 import fabscreen.libraries.legacy.BaseApplication;
+import fabscreen.libraries.legacy.lib.LogHelper;
 import fabscreen.libraries.legacy.lib.file.IFile;
 import fabscreen.libraries.legacy.lib.file.IFileManager;
 import okio.BufferedSource;
@@ -21,13 +22,17 @@ import okio.Okio;
  * ^                     |
  * |_____________________|
  */
-public class GcodePlayer {
+public class GcodePlayer implements BatchAssembler.LineSource {
     private static final String TAG = "GcodePlayer";
 
     private IFile mFile;
     private BufferedSource source;
 
     private String line;
+
+    // SCR-07: set when the file could not be opened or read, so the batch builder pauses the job
+    // instead of resending a stale line (line-count failure loop) or sending an early end of file.
+    private boolean mReadError;
 
     private int sentCount;
     private int receivedCount;
@@ -42,6 +47,7 @@ public class GcodePlayer {
     public void reset() {
         totalCount = sentCount = receivedCount = 0;
         line = null;
+        mReadError = false;
 
         if (source != null) {
             try {
@@ -65,14 +71,17 @@ public class GcodePlayer {
             source = null;
         }
 
+        mReadError = false;
         try {
             mIFileManager = mFile.isLocal() ?
                     BaseApplication.getInstance().getFabLocalFileManager() :
                     BaseApplication.getInstance().getFabUsbFileManager();
             source = Okio.buffer(Okio.source(mIFileManager.getInputStream(mFile)));
         } catch (Exception e) {
-            Log.e(TAG, "File does not exists.");
-            e.printStackTrace();
+            mReadError = true;
+            Logger.e("G-code open failed for %s (local=%b): %s",
+                    mFile == null ? "null" : mFile.getName(), mFile != null && mFile.isLocal(), e);
+            LogHelper.log(e);
         }
     }
 
@@ -90,13 +99,22 @@ public class GcodePlayer {
         sentCount = receivedCount = startLineno;
         pos = 0;
 
+        if (source == null) {
+            // openFile() failed and logged it; mReadError is set.
+            line = null;
+            return;
+        }
+
         // run to start point
         while (pos < startLineno) {
             try {
                 line = source.readUtf8Line();
             } catch (IOException e) {
-                e.printStackTrace();
-                // reset();
+                mReadError = true;
+                this.line = null;
+                Logger.e("G-code read failed at line %d of %s while seeking to %d: %s",
+                        pos, mFile.getName(), startLineno, e);
+                LogHelper.log(e);
                 return;
             }
 
@@ -121,10 +139,20 @@ public class GcodePlayer {
      * Get next line.
      */
     String nextLine() {
+        if (source == null || mReadError) {
+            // Do not count lines that were never read; keep reporting the error.
+            mReadError = true;
+            line = null;
+            return null;
+        }
         try {
             line = source.readUtf8Line();
         } catch (IOException e) {
-            e.printStackTrace();
+            mReadError = true;
+            line = null;
+            Logger.e("G-code read failed at line %d of %s (local=%b): %s",
+                    sentCount, mFile == null ? "null" : mFile.getName(), mFile != null && mFile.isLocal(), e);
+            LogHelper.log(e);
             return null;
         }
 
@@ -140,6 +168,21 @@ public class GcodePlayer {
      */
     String getLine() {
         return line;
+    }
+
+    /** Whether opening or reading the file failed (SCR-07). */
+    public boolean hasReadError() {
+        return mReadError;
+    }
+
+    @Override
+    public String currentLine() {
+        return line;
+    }
+
+    @Override
+    public void advance() {
+        nextLine();
     }
 
     /**
