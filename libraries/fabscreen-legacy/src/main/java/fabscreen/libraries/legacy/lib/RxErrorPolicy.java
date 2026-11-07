@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.net.SocketException;
 
+import io.reactivex.exceptions.OnErrorNotImplementedException;
 import io.reactivex.exceptions.UndeliverableException;
 
 /**
@@ -23,8 +24,10 @@ public final class RxErrorPolicy {
     private RxErrorPolicy() {
     }
 
+    /** The real error inside RxJava's UndeliverableException / OnErrorNotImplementedException wrappers. */
     public static Throwable unwrap(Throwable e) {
-        if (e instanceof UndeliverableException && e.getCause() != null) {
+        if ((e instanceof UndeliverableException || e instanceof OnErrorNotImplementedException)
+                && e.getCause() != null) {
             return e.getCause();
         }
         return e;

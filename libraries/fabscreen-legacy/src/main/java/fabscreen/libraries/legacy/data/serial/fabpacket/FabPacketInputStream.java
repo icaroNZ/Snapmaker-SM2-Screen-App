@@ -17,11 +17,20 @@ public class FabPacketInputStream implements Closeable {
     private static int DEFAULT_BUFFER_SIZE = 8192;
 
     /**
-     * Largest data length (event id + payload) accepted in a frame header. Same limit as the controller
-     * (Snapmaker2-Controller snapmaker/src/common/protocol_sstp.h SSTP_INVALID_DATA_LENGTH = 1024).
-     * A header outside 1..MAX_DATA_LENGTH is a false marker match: skip one byte and resync.
+     * Largest data length (event id + payload) the CONTROLLER link accepts in a frame header: same
+     * limit as the controller (Snapmaker2-Controller snapmaker/src/common/protocol_sstp.h
+     * SSTP_INVALID_DATA_LENGTH = 1024; every controller reply is far smaller). A header outside
+     * 1..maxDataLength is a false marker match: skip one byte and resync. Used by SerialConnection.
      */
     public static final int MAX_DATA_LENGTH = 1024;
+
+    /**
+     * No upper cap other than the 16-bit length field: the default, kept for the laser camera's
+     * Bluetooth link (LaserCameraController), whose photo frames may be larger than 1024 bytes.
+     */
+    public static final int UNLIMITED_DATA_LENGTH = 0xFFFF;
+
+    private final int mMaxDataLength;
 
     /** Number of false headers skipped since the stream was created (diagnostics). */
     private volatile long mResyncCount;
@@ -40,8 +49,17 @@ public class FabPacketInputStream implements Closeable {
     }
 
     public FabPacketInputStream(InputStream in, int size) {
+        this(in, size, UNLIMITED_DATA_LENGTH);
+    }
+
+    /**
+     * @param maxDataLength largest accepted header length; {@link #MAX_DATA_LENGTH} for the
+     *                      controller UART, {@link #UNLIMITED_DATA_LENGTH} otherwise
+     */
+    public FabPacketInputStream(InputStream in, int size, int maxDataLength) {
         this.in = in;
         buf = new byte[size];
+        mMaxDataLength = maxDataLength;
     }
 
     private byte[] getBufIfOpen() throws IOException {
@@ -133,7 +151,7 @@ public class FabPacketInputStream implements Closeable {
             if ((buffer[pos + 2] ^ buffer[pos + 3]) == buffer[pos + 5]) {
                 int length = (buffer[pos + 2] & 0xFF) * 0x100 + (buffer[pos + 3] & 0xFF);
 
-                if (length == 0 || length > MAX_DATA_LENGTH) {
+                if (length == 0 || length > mMaxDataLength) {
                     // False marker match (or corrupt header): resync from the next byte.
                     // Not logged here: this class is also used by host tests; SerialConnection
                     // reports getResyncCount() changes.

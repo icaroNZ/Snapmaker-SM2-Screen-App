@@ -12,6 +12,7 @@ import fabscreen.libraries.legacy.data.serial.fabpacket.FabPacketBuilder;
 import fabscreen.libraries.legacy.data.serial.fabpacket.FabPacketInputStream;
 import fabscreen.libraries.legacy.data.serial.fabpacket.FrameDiagnostics;
 import fabscreen.libraries.legacy.lib.RxErrorPolicy;
+import io.reactivex.exceptions.OnErrorNotImplementedException;
 import io.reactivex.exceptions.UndeliverableException;
 
 /**
@@ -62,7 +63,8 @@ public class SerialRobustnessTest {
         FabPacket good = FabPacketBuilder.gcodeRequest("G28\n", 0);
         byte[] wire = concat(bogus, good.toByteArray());
 
-        FabPacketInputStream reader = new FabPacketInputStream(new ByteArrayInputStream(wire));
+        FabPacketInputStream reader = new FabPacketInputStream(new ByteArrayInputStream(wire), 8192,
+                FabPacketInputStream.MAX_DATA_LENGTH);
         FabPacket p = reader.readPacket();
         Assert.assertNotNull(p);
         Assert.assertEquals(good.getEventId(), p.getEventId());
@@ -86,6 +88,24 @@ public class SerialRobustnessTest {
     @Test
     public void maxDataLengthMatchesController() {
         Assert.assertEquals(1024, FabPacketInputStream.MAX_DATA_LENGTH);
+    }
+
+    @Test
+    public void defaultReaderStillAcceptsLargeFramesForTheCameraLink() throws IOException {
+        // LaserCameraController (Bluetooth) uses the default reader: frames above 1024 bytes must pass.
+        byte[] content = new byte[3000];
+        content[0] = 0x02;
+        FabPacket big = frame(0x0e, content);
+        FabPacketInputStream reader = new FabPacketInputStream(new ByteArrayInputStream(big.toByteArray()), 64);
+        FabPacket p = reader.readPacket();
+        Assert.assertNotNull(p);
+        Assert.assertEquals(3000, p.getContent().length);
+
+        // ...but the controller reader skips the same frame as a false header.
+        FabPacketInputStream controller = new FabPacketInputStream(
+                new ByteArrayInputStream(big.toByteArray()), 64, FabPacketInputStream.MAX_DATA_LENGTH);
+        Assert.assertNull(controller.readPacket());
+        Assert.assertTrue(controller.getResyncCount() >= 1);
     }
 
     @Test
@@ -147,6 +167,8 @@ public class SerialRobustnessTest {
         Assert.assertEquals(RxErrorPolicy.Action.LOG,
                 RxErrorPolicy.classify(new UndeliverableException(new ArrayIndexOutOfBoundsException(1))));
         Assert.assertEquals(RxErrorPolicy.Action.LOG, RxErrorPolicy.classify(new NullPointerException()));
+        Assert.assertEquals(RxErrorPolicy.Action.IGNORE,
+                RxErrorPolicy.classify(new OnErrorNotImplementedException(new IOException("closed"))));
         Throwable cause = new IllegalStateException("x");
         Assert.assertSame(cause, RxErrorPolicy.unwrap(new UndeliverableException(cause)));
     }

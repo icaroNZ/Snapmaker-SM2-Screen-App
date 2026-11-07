@@ -119,7 +119,8 @@ public class SerialConnection {
         Scheduler.Worker worker = Schedulers.io().createWorker();
         worker.schedule(() -> {
             InputStream in = mSerialPort.getInputStream();
-            FabPacketInputStream is = new FabPacketInputStream(in);
+            // SCR-02: the controller never sends more than 1024 data bytes per frame.
+            FabPacketInputStream is = new FabPacketInputStream(in, 8192, FabPacketInputStream.MAX_DATA_LENGTH);
 
             long reportedResyncs = 0;
             long lastResyncLogMs = 0;
