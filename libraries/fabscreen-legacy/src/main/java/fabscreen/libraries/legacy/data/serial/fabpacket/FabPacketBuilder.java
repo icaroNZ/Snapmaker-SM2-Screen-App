@@ -3,6 +3,7 @@ package fabscreen.libraries.legacy.data.serial.fabpacket;
 import androidx.annotation.NonNull;
 
 import fabscreen.libraries.legacy.data.calibration.LevelingParams;
+import fabscreen.libraries.legacy.data.calibration.ZOffsetParams;
 
 import okio.Buffer;
 import okio.ByteString;
@@ -292,6 +293,36 @@ public class FabPacketBuilder {
     public static FabPacket startAutoCalibration(int grid, int bedTemp, int soakSeconds) {
         byte[] content = LevelingParams.buildLevelingPayload(0x02, grid, bedTemp, soakSeconds);
         return buildPacket(FabPacket.SETTINGS_REQUEST_EVENT_ID, content);
+    }
+
+    /**
+     * Settings: Start Auto Calibration with the Z-offset flags byte
+     * (0x09 0x02 grid bed_temp:u16 soak_s:u16 flags:u8, big-endian). Flags bit 0 asks the controller to apply
+     * the stored Z offset and finish without the card step. Needs controller SM2-5.2.1-a250t.4 or later.
+     *
+     * @throws IllegalArgumentException grid not 2..11, bedTemp not 0..110 or soakSeconds not 0..3600
+     */
+    public static FabPacket startAutoCalibration(int grid, int bedTemp, int soakSeconds, boolean useStoredZOffset) {
+        byte[] content = ZOffsetParams.buildAutoLevelPayload(grid, bedTemp, soakSeconds, useStoredZOffset);
+        return buildPacket(FabPacket.SETTINGS_REQUEST_EVENT_ID, content);
+    }
+
+    /**
+     * Settings: Calibrate Z offset (0x09 0x37 [bed_temp:u16 soak_s:u16], big-endian). Probes the bed centre;
+     * the card step then uses 0x09 0x06 / 0x09 0x07 / 0x09 0x08. Needs controller SM2-5.2.1-a250t.4 or later.
+     *
+     * @throws IllegalArgumentException bedTemp not 0..110 or soakSeconds not 0..3600
+     */
+    public static FabPacket startZOffsetCalibration(int bedTemp, int soakSeconds) {
+        byte[] content = ZOffsetParams.buildZOffsetCalibrationPayload(bedTemp, soakSeconds);
+        return buildPacket(FabPacket.SETTINGS_REQUEST_EVENT_ID, content);
+    }
+
+    /**
+     * Settings: Query Z offset (0x09 0x38). Needs controller SM2-5.2.1-a250t.4 or later.
+     */
+    public static FabPacket queryZOffset() {
+        return buildPacket(FabPacket.SETTINGS_REQUEST_EVENT_ID, ZOffsetParams.buildQueryPayload());
     }
 
     /**
